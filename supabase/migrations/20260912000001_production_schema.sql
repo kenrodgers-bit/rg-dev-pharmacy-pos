@@ -1,8 +1,7 @@
 -- ==============================================================================
--- PRODUCTION SUPABASE DATABASE SCHEMA FOR PHARMACY + CLINIC PWA
+-- PRODUCTION SUPABASE DATABASE MIGRATION FOR PHARMACY + CLINIC PWA
 -- Authoritative Source of Truth: PostgreSQL with Row Level Security (RLS)
 -- Canonical Roles: ADMIN, CLINICIAN, CASHIER
--- Run this in the Supabase SQL Editor for your new Supabase project.
 -- ==============================================================================
 
 -- 1. EXTENSIONS
@@ -49,6 +48,7 @@ CREATE INDEX IF NOT EXISTS idx_profiles_status ON public.profiles(status);
 CREATE INDEX IF NOT EXISTS idx_profiles_email ON public.profiles(email);
 
 -- 4. SECURITY DEFINER HELPER FUNCTIONS
+-- Safe search_path protects against search_path hijacking
 CREATE OR REPLACE FUNCTION public.get_current_user_role()
 RETURNS public.user_role
 LANGUAGE plpgsql
@@ -178,7 +178,7 @@ CREATE TABLE IF NOT EXISTS public.consultations (
 CREATE INDEX IF NOT EXISTS idx_consultations_patient ON public.consultations(patient_id);
 CREATE INDEX IF NOT EXISTS idx_consultations_clinician ON public.consultations(clinician_id);
 
--- 8. CATEGORIES TABLE
+-- 8. CATEGORIES TABLE (Database-Driven, NOT hardcoded)
 CREATE TABLE IF NOT EXISTS public.categories (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT UNIQUE NOT NULL,
@@ -191,7 +191,7 @@ CREATE TABLE IF NOT EXISTS public.categories (
 
 CREATE INDEX IF NOT EXISTS idx_categories_active ON public.categories(active);
 
--- 9. MEDICATIONS TABLE
+-- 9. MEDICATIONS TABLE (Master Catalog separated from inventory batches)
 CREATE TABLE IF NOT EXISTS public.medications (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL,
@@ -216,7 +216,7 @@ CREATE INDEX IF NOT EXISTS idx_medications_name ON public.medications(name);
 CREATE INDEX IF NOT EXISTS idx_medications_category ON public.medications(category_id);
 CREATE INDEX IF NOT EXISTS idx_medications_active ON public.medications(active);
 
--- 10. INVENTORY BATCHES TABLE
+-- 10. INVENTORY BATCHES TABLE (Authoritative Batch-based Stock)
 CREATE TABLE IF NOT EXISTS public.inventory_batches (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     medication_id UUID NOT NULL REFERENCES public.medications(id) ON DELETE RESTRICT,
@@ -235,7 +235,7 @@ CREATE INDEX IF NOT EXISTS idx_batches_medication ON public.inventory_batches(me
 CREATE INDEX IF NOT EXISTS idx_batches_expiry ON public.inventory_batches(expiry_date);
 CREATE INDEX IF NOT EXISTS idx_batches_qty ON public.inventory_batches(quantity_on_hand);
 
--- 11. INVENTORY MOVEMENTS TABLE
+-- 11. INVENTORY MOVEMENTS TABLE (Mandatory Audit Trail for Every Stock Change)
 CREATE TABLE IF NOT EXISTS public.inventory_movements (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     medication_id UUID NOT NULL REFERENCES public.medications(id) ON DELETE RESTRICT,
@@ -253,7 +253,7 @@ CREATE INDEX IF NOT EXISTS idx_movements_medication ON public.inventory_movement
 CREATE INDEX IF NOT EXISTS idx_movements_batch ON public.inventory_movements(batch_id);
 CREATE INDEX IF NOT EXISTS idx_movements_created ON public.inventory_movements(created_at);
 
--- 12. CLINICAL TESTS TABLE
+-- 12. CLINICAL TESTS TABLE (Test Catalog)
 CREATE TABLE IF NOT EXISTS public.tests (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     code TEXT UNIQUE NOT NULL,
@@ -281,6 +281,9 @@ CREATE TABLE IF NOT EXISTS public.test_orders (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE INDEX IF NOT EXISTS idx_test_orders_patient ON public.test_orders(patient_id);
+CREATE INDEX IF NOT EXISTS idx_test_orders_status ON public.test_orders(status);
+
 -- 14. TEST RESULTS TABLE
 CREATE TABLE IF NOT EXISTS public.test_results (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -293,7 +296,7 @@ CREATE TABLE IF NOT EXISTS public.test_results (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- 15. PRESCRIPTIONS TABLE
+-- 15. PRESCRIPTIONS TABLE (Multi-Medication Architecture)
 CREATE TABLE IF NOT EXISTS public.prescriptions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     prescription_number TEXT UNIQUE NOT NULL,
@@ -308,6 +311,11 @@ CREATE TABLE IF NOT EXISTS public.prescriptions (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE INDEX IF NOT EXISTS idx_prescriptions_rx ON public.prescriptions(prescription_number);
+CREATE INDEX IF NOT EXISTS idx_prescriptions_barcode ON public.prescriptions(barcode);
+CREATE INDEX IF NOT EXISTS idx_prescriptions_patient ON public.prescriptions(patient_id);
+CREATE INDEX IF NOT EXISTS idx_prescriptions_status ON public.prescriptions(status);
 
 -- 16. PRESCRIPTION ITEMS TABLE
 CREATE TABLE IF NOT EXISTS public.prescription_items (
@@ -325,11 +333,14 @@ CREATE TABLE IF NOT EXISTS public.prescription_items (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE INDEX IF NOT EXISTS idx_rx_items_rx ON public.prescription_items(prescription_id);
+CREATE INDEX IF NOT EXISTS idx_rx_items_med ON public.prescription_items(medication_id);
+
 -- 17. SALES TABLE
 CREATE TABLE IF NOT EXISTS public.sales (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     receipt_number TEXT UNIQUE NOT NULL,
-    client_operation_id TEXT UNIQUE NOT NULL,
+    client_operation_id TEXT UNIQUE NOT NULL, -- Idempotency key for offline reconnect
     patient_id UUID REFERENCES public.patients(id) ON DELETE SET NULL,
     prescription_id UUID REFERENCES public.prescriptions(id) ON DELETE SET NULL,
     cashier_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE RESTRICT,
@@ -341,6 +352,10 @@ CREATE TABLE IF NOT EXISTS public.sales (
     is_offline BOOLEAN NOT NULL DEFAULT false,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE INDEX IF NOT EXISTS idx_sales_receipt ON public.sales(receipt_number);
+CREATE INDEX IF NOT EXISTS idx_sales_operation_id ON public.sales(client_operation_id);
+CREATE INDEX IF NOT EXISTS idx_sales_created ON public.sales(created_at);
 
 -- 18. SALE ITEMS TABLE
 CREATE TABLE IF NOT EXISTS public.sale_items (
@@ -356,6 +371,9 @@ CREATE TABLE IF NOT EXISTS public.sale_items (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE INDEX IF NOT EXISTS idx_sale_items_sale ON public.sale_items(sale_id);
+CREATE INDEX IF NOT EXISTS idx_sale_items_med ON public.sale_items(medication_id);
+
 -- 19. PAYMENTS TABLE
 CREATE TABLE IF NOT EXISTS public.payments (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -367,7 +385,9 @@ CREATE TABLE IF NOT EXISTS public.payments (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- 20. AUDIT LOGS TABLE
+CREATE INDEX IF NOT EXISTS idx_payments_sale ON public.payments(sale_id);
+
+-- 20. AUDIT LOGS TABLE (Immutable Trail)
 CREATE TABLE IF NOT EXISTS public.audit_logs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
@@ -378,6 +398,10 @@ CREATE TABLE IF NOT EXISTS public.audit_logs (
     metadata JSONB DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON public.audit_logs(created_at);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON public.audit_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON public.audit_logs(action);
 
 -- 21. SETTINGS TABLE
 CREATE TABLE IF NOT EXISTS public.settings (
@@ -406,7 +430,12 @@ CREATE TABLE IF NOT EXISTS public.settings (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- 22. ROW LEVEL SECURITY
+-- ==============================================================================
+-- 22. ROW LEVEL SECURITY (RLS) POLICIES
+-- Strict role authorization for ADMIN, CLINICIAN, CASHIER
+-- NO anonymous policies, NO USING (true) for writes/sensitive records
+-- ==============================================================================
+
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.patients ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.visits ENABLE ROW LEVEL SECURITY;
@@ -426,58 +455,223 @@ ALTER TABLE public.payments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.settings ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "Authenticated users can view active profiles" ON public.profiles FOR SELECT TO authenticated USING (public.is_active_user());
-CREATE POLICY "Users can update their own non-role profile fields" ON public.profiles FOR UPDATE TO authenticated USING (id = auth.uid()) WITH CHECK (id = auth.uid() AND role = (SELECT role FROM public.profiles WHERE id = auth.uid()) AND status = (SELECT status FROM public.profiles WHERE id = auth.uid()));
-CREATE POLICY "Admin has full profile management" ON public.profiles FOR ALL TO authenticated USING (public.is_admin()) WITH CHECK (public.is_admin());
+-- 22.1 PROFILES POLICIES
+CREATE POLICY "Authenticated users can view active profiles"
+ON public.profiles FOR SELECT
+TO authenticated
+USING (public.is_active_user());
 
-CREATE POLICY "Active users can view patients" ON public.patients FOR SELECT TO authenticated USING (public.is_active_user());
-CREATE POLICY "Clinicians and Admins can create patients" ON public.patients FOR INSERT TO authenticated WITH CHECK (public.is_admin() OR public.is_clinician() OR public.is_cashier());
-CREATE POLICY "Clinicians and Admins can update patients" ON public.patients FOR UPDATE TO authenticated USING (public.is_admin() OR public.is_clinician()) WITH CHECK (public.is_admin() OR public.is_clinician());
+CREATE POLICY "Users can update their own non-role profile fields"
+ON public.profiles FOR UPDATE
+TO authenticated
+USING (id = auth.uid())
+WITH CHECK (
+    id = auth.uid()
+    AND role = (SELECT role FROM public.profiles WHERE id = auth.uid())
+    AND status = (SELECT status FROM public.profiles WHERE id = auth.uid())
+);
 
-CREATE POLICY "Clinicians and Admins can view visits" ON public.visits FOR SELECT TO authenticated USING (public.is_admin() OR public.is_clinician());
-CREATE POLICY "Clinicians and Admins can create visits" ON public.visits FOR INSERT TO authenticated WITH CHECK (public.is_admin() OR public.is_clinician());
-CREATE POLICY "Clinicians and Admins can view consultations" ON public.consultations FOR SELECT TO authenticated USING (public.is_admin() OR public.is_clinician());
-CREATE POLICY "Clinicians and Admins can insert consultations" ON public.consultations FOR INSERT TO authenticated WITH CHECK (public.is_admin() OR public.is_clinician());
+CREATE POLICY "Admin has full profile management"
+ON public.profiles FOR ALL
+TO authenticated
+USING (public.is_admin())
+WITH CHECK (public.is_admin());
 
-CREATE POLICY "Active users can view categories" ON public.categories FOR SELECT TO authenticated USING (public.is_active_user());
-CREATE POLICY "Admins can manage categories" ON public.categories FOR ALL TO authenticated USING (public.is_admin()) WITH CHECK (public.is_admin());
+-- 22.2 PATIENTS POLICIES
+CREATE POLICY "Active users can view patients"
+ON public.patients FOR SELECT
+TO authenticated
+USING (public.is_active_user());
 
-CREATE POLICY "Active users can view medications" ON public.medications FOR SELECT TO authenticated USING (public.is_active_user());
-CREATE POLICY "Admins can manage medications" ON public.medications FOR ALL TO authenticated USING (public.is_admin()) WITH CHECK (public.is_admin());
+CREATE POLICY "Clinicians and Admins can create and modify patients"
+ON public.patients FOR INSERT
+TO authenticated
+WITH CHECK (public.is_admin() OR public.is_clinician() OR public.is_cashier());
 
-CREATE POLICY "Active users can view inventory batches" ON public.inventory_batches FOR SELECT TO authenticated USING (public.is_active_user());
-CREATE POLICY "Admins can directly manage inventory batches" ON public.inventory_batches FOR ALL TO authenticated USING (public.is_admin()) WITH CHECK (public.is_admin());
+CREATE POLICY "Clinicians and Admins can update patients"
+ON public.patients FOR UPDATE
+TO authenticated
+USING (public.is_admin() OR public.is_clinician())
+WITH CHECK (public.is_admin() OR public.is_clinician());
 
-CREATE POLICY "Admins can view inventory movements" ON public.inventory_movements FOR SELECT TO authenticated USING (public.is_admin());
+-- 22.3 VISITS & CONSULTATIONS (Clinical Access Only)
+CREATE POLICY "Clinicians and Admins can view visits"
+ON public.visits FOR SELECT
+TO authenticated
+USING (public.is_admin() OR public.is_clinician());
 
-CREATE POLICY "Active users can view tests catalog" ON public.tests FOR SELECT TO authenticated USING (public.is_active_user());
-CREATE POLICY "Admins can manage tests catalog" ON public.tests FOR ALL TO authenticated USING (public.is_admin()) WITH CHECK (public.is_admin());
-CREATE POLICY "Active users can view test orders" ON public.test_orders FOR SELECT TO authenticated USING (public.is_admin() OR public.is_clinician());
-CREATE POLICY "Clinicians and Admins can manage test orders" ON public.test_orders FOR ALL TO authenticated USING (public.is_admin() OR public.is_clinician()) WITH CHECK (public.is_admin() OR public.is_clinician());
-CREATE POLICY "Clinicians and Admins can view test results" ON public.test_results FOR SELECT TO authenticated USING (public.is_admin() OR public.is_clinician());
-CREATE POLICY "Clinicians and Admins can record test results" ON public.test_results FOR INSERT TO authenticated WITH CHECK (public.is_admin() OR public.is_clinician());
+CREATE POLICY "Clinicians and Admins can create visits"
+ON public.visits FOR INSERT
+TO authenticated
+WITH CHECK (public.is_admin() OR public.is_clinician());
 
-CREATE POLICY "Active users can view prescriptions" ON public.prescriptions FOR SELECT TO authenticated USING (public.is_active_user());
-CREATE POLICY "Clinicians and Admins can create prescriptions" ON public.prescriptions FOR INSERT TO authenticated WITH CHECK (public.is_admin() OR public.is_clinician());
-CREATE POLICY "Clinicians and Admins can update prescriptions" ON public.prescriptions FOR UPDATE TO authenticated USING (public.is_admin() OR public.is_clinician()) WITH CHECK (public.is_admin() OR public.is_clinician());
-CREATE POLICY "Active users can view prescription items" ON public.prescription_items FOR SELECT TO authenticated USING (public.is_active_user());
-CREATE POLICY "Clinicians and Admins can manage prescription items" ON public.prescription_items FOR ALL TO authenticated USING (public.is_admin() OR public.is_clinician()) WITH CHECK (public.is_admin() OR public.is_clinician());
+CREATE POLICY "Clinicians and Admins can view consultations"
+ON public.consultations FOR SELECT
+TO authenticated
+USING (public.is_admin() OR public.is_clinician());
 
-CREATE POLICY "Admins and Cashiers can view sales" ON public.sales FOR SELECT TO authenticated USING (public.is_admin() OR (public.is_cashier() AND cashier_id = auth.uid()));
-CREATE POLICY "Admins and Cashiers can view sale items" ON public.sale_items FOR SELECT TO authenticated USING (public.is_admin() OR public.is_cashier());
-CREATE POLICY "Admins and Cashiers can view payments" ON public.payments FOR SELECT TO authenticated USING (public.is_admin() OR public.is_cashier());
+CREATE POLICY "Clinicians and Admins can insert consultations"
+ON public.consultations FOR INSERT
+TO authenticated
+WITH CHECK (public.is_admin() OR public.is_clinician());
 
-CREATE POLICY "Admins can view audit logs" ON public.audit_logs FOR SELECT TO authenticated USING (public.is_admin());
-CREATE POLICY "Active users can append audit logs" ON public.audit_logs FOR INSERT TO authenticated WITH CHECK (public.is_active_user() AND (user_id IS NULL OR user_id = auth.uid()));
+-- 22.4 CATEGORIES POLICIES
+CREATE POLICY "Active users can view categories"
+ON public.categories FOR SELECT
+TO authenticated
+USING (public.is_active_user());
 
-CREATE POLICY "Active users can view settings" ON public.settings FOR SELECT TO authenticated USING (public.is_active_user());
-CREATE POLICY "Admins can update settings" ON public.settings FOR UPDATE TO authenticated USING (public.is_admin()) WITH CHECK (public.is_admin());
+CREATE POLICY "Admins can manage categories"
+ON public.categories FOR ALL
+TO authenticated
+USING (public.is_admin())
+WITH CHECK (public.is_admin());
 
--- 23. ATOMIC SALES RPC
+-- 22.5 MEDICATIONS POLICIES
+CREATE POLICY "Active users can view medications"
+ON public.medications FOR SELECT
+TO authenticated
+USING (public.is_active_user());
+
+CREATE POLICY "Admins can manage medications"
+ON public.medications FOR ALL
+TO authenticated
+USING (public.is_admin())
+WITH CHECK (public.is_admin());
+
+-- 22.6 INVENTORY BATCHES POLICIES
+CREATE POLICY "Active users can view inventory batches"
+ON public.inventory_batches FOR SELECT
+TO authenticated
+USING (public.is_active_user());
+
+CREATE POLICY "Admins can directly manage inventory batches"
+ON public.inventory_batches FOR ALL
+TO authenticated
+USING (public.is_admin())
+WITH CHECK (public.is_admin());
+
+-- 22.7 INVENTORY MOVEMENTS POLICIES
+CREATE POLICY "Admins can view inventory movements"
+ON public.inventory_movements FOR SELECT
+TO authenticated
+USING (public.is_admin());
+
+-- 22.8 TESTS & TEST ORDERS POLICIES
+CREATE POLICY "Active users can view tests catalog"
+ON public.tests FOR SELECT
+TO authenticated
+USING (public.is_active_user());
+
+CREATE POLICY "Admins can manage tests catalog"
+ON public.tests FOR ALL
+TO authenticated
+USING (public.is_admin())
+WITH CHECK (public.is_admin());
+
+CREATE POLICY "Active users can view test orders"
+ON public.test_orders FOR SELECT
+TO authenticated
+USING (public.is_admin() OR public.is_clinician());
+
+CREATE POLICY "Clinicians and Admins can manage test orders"
+ON public.test_orders FOR ALL
+TO authenticated
+USING (public.is_admin() OR public.is_clinician())
+WITH CHECK (public.is_admin() OR public.is_clinician());
+
+CREATE POLICY "Clinicians and Admins can view test results"
+ON public.test_results FOR SELECT
+TO authenticated
+USING (public.is_admin() OR public.is_clinician());
+
+CREATE POLICY "Clinicians and Admins can record test results"
+ON public.test_results FOR INSERT
+TO authenticated
+WITH CHECK (public.is_admin() OR public.is_clinician());
+
+-- 22.9 PRESCRIPTIONS & PRESCRIPTION ITEMS POLICIES
+CREATE POLICY "Active users can view prescriptions"
+ON public.prescriptions FOR SELECT
+TO authenticated
+USING (public.is_active_user());
+
+CREATE POLICY "Clinicians and Admins can create prescriptions"
+ON public.prescriptions FOR INSERT
+TO authenticated
+WITH CHECK (public.is_admin() OR public.is_clinician());
+
+CREATE POLICY "Clinicians and Admins can update prescriptions"
+ON public.prescriptions FOR UPDATE
+TO authenticated
+USING (public.is_admin() OR public.is_clinician())
+WITH CHECK (public.is_admin() OR public.is_clinician());
+
+CREATE POLICY "Active users can view prescription items"
+ON public.prescription_items FOR SELECT
+TO authenticated
+USING (public.is_active_user());
+
+CREATE POLICY "Clinicians and Admins can manage prescription items"
+ON public.prescription_items FOR ALL
+TO authenticated
+USING (public.is_admin() OR public.is_clinician())
+WITH CHECK (public.is_admin() OR public.is_clinician());
+
+-- 22.10 SALES, SALE ITEMS & PAYMENTS POLICIES (Immutable Ledger)
+CREATE POLICY "Admins and Cashiers can view sales"
+ON public.sales FOR SELECT
+TO authenticated
+USING (public.is_admin() OR (public.is_cashier() AND cashier_id = auth.uid()));
+
+CREATE POLICY "Admins and Cashiers can view sale items"
+ON public.sale_items FOR SELECT
+TO authenticated
+USING (public.is_admin() OR public.is_cashier());
+
+CREATE POLICY "Admins and Cashiers can view payments"
+ON public.payments FOR SELECT
+TO authenticated
+USING (public.is_admin() OR public.is_cashier());
+
+-- 22.11 AUDIT LOGS POLICIES
+CREATE POLICY "Admins can view audit logs"
+ON public.audit_logs FOR SELECT
+TO authenticated
+USING (public.is_admin());
+
+CREATE POLICY "Active users can append audit logs"
+ON public.audit_logs FOR INSERT
+TO authenticated
+WITH CHECK (public.is_active_user() AND (user_id IS NULL OR user_id = auth.uid()));
+
+-- Deny UPDATE and DELETE on audit logs for everyone
+-- (No policies created for UPDATE/DELETE means default deny)
+
+-- 22.12 SETTINGS POLICIES
+CREATE POLICY "Active users can view settings"
+ON public.settings FOR SELECT
+TO authenticated
+USING (public.is_active_user());
+
+CREATE POLICY "Admins can update settings"
+ON public.settings FOR UPDATE
+TO authenticated
+USING (public.is_admin())
+WITH CHECK (public.is_admin());
+
+
+-- ==============================================================================
+-- 23. TRANSACTION-SAFE RPC FUNCTIONS
+-- ==============================================================================
+
+-- 23.1 ATOMIC SALE TRANSACTION (complete_sale)
+-- Executes atomically with row-level locking (FOR UPDATE), idempotency,
+-- batch deduction, inventory movements, and prescription status updating.
 CREATE OR REPLACE FUNCTION public.complete_sale(
     p_operation_id TEXT,
     p_receipt_number TEXT,
-    p_items JSONB,
+    p_items JSONB, -- Array of objects: { medication_id, batch_id, quantity, unit_price, discount_percent, prescription_item_id }
     p_payment_method TEXT,
     p_total NUMERIC,
     p_subtotal NUMERIC,
@@ -511,6 +705,7 @@ DECLARE
     v_rx_qty_prescribed INTEGER;
     v_rx_qty_dispensed INTEGER;
 BEGIN
+    -- 1. Verify caller authentication and role (CASHIER or ADMIN only)
     IF v_cashier_id IS NULL THEN
         RAISE EXCEPTION 'Authentication required to complete sales.';
     END IF;
@@ -523,6 +718,7 @@ BEGIN
         RAISE EXCEPTION 'Unauthorized: Only active cashiers or administrators can finalize sales.';
     END IF;
 
+    -- 2. Idempotency check: if client_operation_id already executed, return existing sale
     SELECT id INTO v_existing_sale_id
     FROM public.sales
     WHERE client_operation_id = p_operation_id;
@@ -536,10 +732,12 @@ BEGIN
         );
     END IF;
 
+    -- 3. Validate items payload
     IF p_items IS NULL OR jsonb_array_length(p_items) = 0 THEN
         RAISE EXCEPTION 'Cannot complete sale with empty item list.';
     END IF;
 
+    -- 4. Create Sale Record
     INSERT INTO public.sales (
         receipt_number,
         client_operation_id,
@@ -566,6 +764,7 @@ BEGIN
         p_is_offline
     ) RETURNING id INTO v_sale_id;
 
+    -- 5. Process each item with row locking and batch deduction
     FOR v_item IN SELECT * FROM jsonb_to_recordset(p_items) AS x(
         medication_id UUID,
         batch_id UUID,
@@ -586,6 +785,7 @@ BEGIN
             RAISE EXCEPTION 'Sale item quantity must be greater than zero.';
         END IF;
 
+        -- If specific batch not provided, select FEFO (First Expired First Out) batch
         IF v_batch_id IS NULL THEN
             SELECT id INTO v_batch_id
             FROM public.inventory_batches
@@ -594,6 +794,7 @@ BEGIN
             LIMIT 1
             FOR UPDATE;
         ELSE
+            -- Lock specified batch
             PERFORM 1 FROM public.inventory_batches WHERE id = v_batch_id FOR UPDATE;
         END IF;
 
@@ -601,6 +802,7 @@ BEGIN
             RAISE EXCEPTION 'No batch available with sufficient stock for medication %', v_med_id;
         END IF;
 
+        -- Verify stock availability
         SELECT quantity_on_hand INTO v_avail_qty
         FROM public.inventory_batches
         WHERE id = v_batch_id;
@@ -609,11 +811,13 @@ BEGIN
             RAISE EXCEPTION 'Insufficient stock in batch %. Requested: %, Available: %', v_batch_id, v_qty, v_avail_qty;
         END IF;
 
+        -- Deduct stock from batch
         UPDATE public.inventory_batches
         SET quantity_on_hand = quantity_on_hand - v_qty,
             updated_at = now()
         WHERE id = v_batch_id;
 
+        -- Record inventory movement
         INSERT INTO public.inventory_movements (
             medication_id,
             batch_id,
@@ -634,8 +838,10 @@ BEGIN
             v_cashier_id
         );
 
+        -- Calculate total price for line item
         v_line_total := ROUND((v_qty * v_unit_price * (1.00 - (v_disc_pct / 100.00))), 2);
 
+        -- Insert Sale Item
         INSERT INTO public.sale_items (
             sale_id,
             medication_id,
@@ -656,6 +862,7 @@ BEGIN
             v_line_total
         );
 
+        -- Update Prescription Item if linked
         IF v_rx_item_id IS NOT NULL THEN
             SELECT quantity, quantity_dispensed INTO v_rx_qty_prescribed, v_rx_qty_dispensed
             FROM public.prescription_items
@@ -672,6 +879,7 @@ BEGIN
         END IF;
     END LOOP;
 
+    -- Update linked Prescription overall status if all items dispensed
     IF p_prescription_id IS NOT NULL THEN
         UPDATE public.prescriptions
         SET status = CASE
@@ -685,6 +893,7 @@ BEGIN
         WHERE id = p_prescription_id;
     END IF;
 
+    -- 6. Insert Payment Record
     INSERT INTO public.payments (
         sale_id,
         payment_method,
@@ -697,6 +906,7 @@ BEGIN
         p_payment_reference
     );
 
+    -- 7. Audit Event
     INSERT INTO public.audit_logs (
         user_id,
         role,
@@ -728,6 +938,8 @@ BEGIN
 END;
 $$;
 
+-- 23.2 INVENTORY ADJUSTMENT RPC (adjust_inventory)
+-- Only ADMIN may perform unrestricted stock adjustments
 CREATE OR REPLACE FUNCTION public.adjust_inventory(
     p_batch_id UUID,
     p_quantity_change INTEGER,
@@ -756,6 +968,7 @@ BEGIN
         RAISE EXCEPTION 'Reason is mandatory for inventory adjustments.';
     END IF;
 
+    -- Lock batch row
     SELECT medication_id, quantity_on_hand INTO v_med_id, v_current_qty
     FROM public.inventory_batches
     WHERE id = p_batch_id
@@ -770,11 +983,13 @@ BEGIN
         RAISE EXCEPTION 'Adjustment would result in negative inventory (Current: %, Change: %)', v_current_qty, p_quantity_change;
     END IF;
 
+    -- Update batch quantity
     UPDATE public.inventory_batches
     SET quantity_on_hand = v_new_qty,
         updated_at = now()
     WHERE id = p_batch_id;
 
+    -- Insert movement record
     INSERT INTO public.inventory_movements (
         medication_id,
         batch_id,
@@ -795,6 +1010,7 @@ BEGIN
         v_user_id
     );
 
+    -- Audit log
     INSERT INTO public.audit_logs (
         user_id,
         role,
@@ -826,6 +1042,8 @@ BEGIN
 END;
 $$;
 
+-- 23.3 ADMIN USER MANAGEMENT RPCs
+-- Allows authorized admin to create, update, and manage accounts securely
 CREATE OR REPLACE FUNCTION public.admin_create_user(
     p_email TEXT,
     p_password TEXT,
@@ -856,9 +1074,11 @@ BEGIN
         RAISE EXCEPTION 'Password must be at least 6 characters long.';
     END IF;
 
+    -- Generate password hash using pgcrypto
     v_encrypted_pw := extensions.crypt(p_password, extensions.gen_salt('bf'));
     v_new_user_id := gen_random_uuid();
 
+    -- Insert into auth.users
     INSERT INTO auth.users (
         instance_id,
         id,
@@ -885,6 +1105,7 @@ BEGIN
         now()
     );
 
+    -- Insert profile
     INSERT INTO public.profiles (
         id,
         full_name,
@@ -909,6 +1130,7 @@ BEGIN
         END
     );
 
+    -- Audit trail
     INSERT INTO public.audit_logs (
         user_id,
         role,
@@ -938,6 +1160,7 @@ BEGIN
 END;
 $$;
 
+-- 23.4 ADMIN USER UPDATE RPC
 CREATE OR REPLACE FUNCTION public.admin_update_user(
     p_target_user_id UUID,
     p_full_name TEXT,
@@ -969,6 +1192,7 @@ BEGIN
         RAISE EXCEPTION 'User profile not found: %', p_target_user_id;
     END IF;
 
+    -- Protect against removal or deactivation of final active ADMIN
     IF v_target_curr_role = 'ADMIN' AND (p_role <> 'ADMIN' OR p_status <> 'ACTIVE') THEN
         SELECT COUNT(*) INTO v_admin_count
         FROM public.profiles
@@ -988,6 +1212,7 @@ BEGIN
         updated_at = now()
     WHERE id = p_target_user_id;
 
+    -- Audit log
     INSERT INTO public.audit_logs (
         user_id,
         role,
@@ -1012,6 +1237,7 @@ BEGIN
 END;
 $$;
 
+-- 23.5 ADMIN PASSWORD RESET RPC
 CREATE OR REPLACE FUNCTION public.admin_reset_password(
     p_target_user_id UUID,
     p_new_password TEXT
@@ -1057,6 +1283,8 @@ BEGIN
 END;
 $$;
 
+-- 23.6 BOOTSTRAP INITIAL ADMINISTRATOR RPC
+-- Runs ONLY when zero users exist in the system to set up the first ADMIN.
 CREATE OR REPLACE FUNCTION public.bootstrap_first_admin(
     p_email TEXT,
     p_password TEXT,
@@ -1148,3 +1376,80 @@ BEGIN
     );
 END;
 $$;
+
+
+-- ==============================================================================
+-- 24. REALTIME PUBLICATION CONFIGURATION
+-- Target tables published to Supabase Realtime channel
+-- ==============================================================================
+DO $$
+DECLARE
+    tbl TEXT;
+    tables TEXT[] := ARRAY['medications', 'inventory_batches', 'prescriptions', 'prescription_items', 'test_orders', 'categories', 'sales'];
+BEGIN
+    FOREACH tbl IN ARRAY tables LOOP
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_publication_tables
+            WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = tbl
+        ) THEN
+            EXECUTE format('ALTER PUBLICATION supabase_realtime ADD TABLE public.%I;', tbl);
+        END IF;
+    END LOOP;
+END $$;
+
+
+-- ==============================================================================
+-- 25. SEED DATA (INITIAL DEFAULT SETTINGS & CORE CATEGORIES)
+-- ==============================================================================
+INSERT INTO public.settings (
+    id,
+    pharmacy_name,
+    tagline,
+    address_line1,
+    address_line2,
+    phone,
+    email,
+    license_number,
+    tax_id,
+    tax_rate,
+    paper_width,
+    currency_symbol
+) VALUES (
+    'default_settings',
+    'RG Apothecary & Health Pharmacy',
+    'Care You Can Trust, Everyday',
+    'Kimathi Street, City Centre',
+    'P.O. Box 48291-00100, Nairobi',
+    '+254 700 123 456',
+    'dispensary@apothecary.co.ke',
+    'PPB-RET-2024-8819',
+    'P051234567Z',
+    0.16,
+    '80mm',
+    'KSh'
+) ON CONFLICT (id) DO UPDATE SET
+    pharmacy_name = EXCLUDED.pharmacy_name,
+    updated_at = now();
+
+-- Initial Database Categories
+INSERT INTO public.categories (name, type, description)
+VALUES
+    ('Antibiotics', 'MEDICATION', 'Systemic and topical antibacterial agents'),
+    ('Cardiovascular', 'MEDICATION', 'Antihypertensives, statins, and cardiac agents'),
+    ('Pain & Analgesics', 'MEDICATION', 'Analgesics, NSAIDs, and antipyretics'),
+    ('Respiratory', 'MEDICATION', 'Inhalers, antihistamines, and bronchodilators'),
+    ('Gastrointestinal', 'MEDICATION', 'Antacids, proton pump inhibitors, and antiemetics'),
+    ('Diabetes', 'MEDICATION', 'Insulins, oral hypoglycemics, and test strips'),
+    ('OTC & First Aid', 'MEDICATION', 'Over-the-counter self-care, bandages, and antiseptics'),
+    ('Vitamins & Supplements', 'MEDICATION', 'Multivitamins, minerals, and dietary supplements')
+ON CONFLICT (name) DO NOTHING;
+
+-- Initial Clinical Tests Catalog
+INSERT INTO public.tests (code, name, category, price, description)
+VALUES
+    ('MAL-RDT', 'Malaria Rapid Diagnostic Test (RDT)', 'Parasitology', 350.00, 'Whole blood capillary Pf/Pan test cassette'),
+    ('BSL-FAST', 'Random Blood Glucose Test', 'Biochemistry', 250.00, 'Immediate capillary blood glucose screening'),
+    ('CBC-DIFF', 'Full Blood Count (FBC/CBC)', 'Hematology', 1200.00, 'Automated 5-part differential complete blood profile'),
+    ('TYPH-DOT', 'Typhoid Serology Test', 'Microbiology', 600.00, 'Salmonella typhi IgM/IgG rapid screen'),
+    ('URIN-MIC', 'Urinalysis Multi-Stix & Microscopy', 'Microbiology', 450.00, 'Chemical strip profile plus sediment examination')
+ON CONFLICT (code) DO NOTHING;

@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { User, UserRole, UserStatus } from '../types';
 import { storageService } from '../services/storage';
+import { pharmacyService } from '../services/pharmacyService';
 
 interface UserManagementViewProps {
   currentUser: User;
@@ -88,7 +89,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
   });
 
   // Handle Create User
-  const handleCreateSubmit = (e: React.FormEvent) => {
+  const handleCreateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
 
@@ -97,79 +98,100 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
       return;
     }
 
-    const res = storageService.createUser(currentUser, {
-      name: newName,
-      username: newUsername,
-      email: newEmail,
-      phone: newPhone,
-      role: newRole,
-      password: newPassword,
-      licenseNumber: newLicense,
-    });
-
-    if (!res.success) {
-      setFormError(res.error || 'Failed to create user account.');
+    if (newPassword.trim().length < 6) {
+      setFormError('Password must be at least 6 characters long for secure authentication.');
       return;
     }
 
-    onShowToast(`Created staff account for ${newName} successfully.`, 'success');
-    setIsCreateModalOpen(false);
-    // Reset form
-    setNewName('');
-    setNewUsername('');
-    setNewEmail('');
-    setNewPhone('');
-    setNewRole('cashier');
-    setNewPassword('');
-    setNewLicense('');
-    onRefreshUsers();
+    const emailToUse = newEmail.trim() || `${newUsername.trim().toLowerCase()}@pharmacy.local`;
+    const canonicalRole = newRole.toUpperCase() as 'ADMIN' | 'CLINICIAN' | 'CASHIER';
+
+    try {
+      await pharmacyService.adminCreateUser({
+        email: emailToUse,
+        password: newPassword.trim(),
+        fullName: newName.trim(),
+        role: canonicalRole,
+        phone: newPhone.trim() || undefined,
+        licenseNumber: newLicense.trim() || undefined,
+      });
+
+      onShowToast(`Created staff account for ${newName} successfully.`, 'success');
+      setIsCreateModalOpen(false);
+      // Reset form
+      setNewName('');
+      setNewUsername('');
+      setNewEmail('');
+      setNewPhone('');
+      setNewRole('cashier');
+      setNewPassword('');
+      setNewLicense('');
+      onRefreshUsers();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setFormError(msg || 'Failed to create user account.');
+    }
   };
 
   // Handle Edit User
-  const handleEditSubmit = (e: React.FormEvent) => {
+  const handleEditSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingUser) return;
     setFormError(null);
 
-    const res = storageService.updateUser(currentUser, editingUser.id, {
-      name: editingUser.name,
-      email: editingUser.email,
-      phone: editingUser.phone,
-      licenseNumber: editingUser.licenseNumber,
-      role: editingUser.role,
-      status: editingUser.status,
-    });
+    const canonicalRole = editingUser.role.toUpperCase() as 'ADMIN' | 'CLINICIAN' | 'CASHIER';
+    const canonicalStatus = editingUser.status.toUpperCase() as 'ACTIVE' | 'INACTIVE';
 
-    if (!res.success) {
-      setFormError(res.error || 'Failed to update user account.');
-      return;
+    try {
+      await pharmacyService.adminUpdateUser({
+        targetUserId: editingUser.id,
+        fullName: editingUser.name.trim(),
+        role: canonicalRole,
+        status: canonicalStatus,
+        phone: editingUser.phone?.trim() || undefined,
+        licenseNumber: editingUser.licenseNumber?.trim() || undefined,
+      });
+
+      onShowToast(`Updated account details for ${editingUser.name}.`, 'success');
+      setEditingUser(null);
+      onRefreshUsers();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setFormError(msg || 'Failed to update user account.');
     }
-
-    onShowToast(`Updated account details for ${editingUser.name}.`, 'success');
-    setEditingUser(null);
-    onRefreshUsers();
   };
 
   // Handle Deactivate / Activate
-  const handleConfirmToggleStatus = () => {
+  const handleConfirmToggleStatus = async () => {
     if (!deactivatingUser) return;
 
-    const res = storageService.toggleUserStatus(currentUser, deactivatingUser.id);
-    if (!res.success) {
-      onShowToast(res.error || 'Failed to update user status.', 'warning');
-    } else {
-      const newStatus = res.user?.status;
+    const canonicalRole = deactivatingUser.role.toUpperCase() as 'ADMIN' | 'CLINICIAN' | 'CASHIER';
+    const targetStatus = deactivatingUser.status === 'active' ? 'INACTIVE' : 'ACTIVE';
+
+    try {
+      await pharmacyService.adminUpdateUser({
+        targetUserId: deactivatingUser.id,
+        fullName: deactivatingUser.name,
+        role: canonicalRole,
+        status: targetStatus,
+        phone: deactivatingUser.phone,
+        licenseNumber: deactivatingUser.licenseNumber,
+      });
+
       onShowToast(
-        `Account for ${deactivatingUser.name} has been ${newStatus === 'active' ? 'activated' : 'deactivated'}.`,
+        `Account for ${deactivatingUser.name} has been ${targetStatus === 'ACTIVE' ? 'activated' : 'deactivated'}.`,
         'info'
       );
       onRefreshUsers();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      onShowToast(msg || 'Failed to update user status.', 'warning');
     }
     setDeactivatingUser(null);
   };
 
-  // Handle Delete
-  const handleConfirmDelete = () => {
+  // Handle Delete (or permanent deactivation)
+  const handleConfirmDelete = async () => {
     if (!deletingUser) return;
 
     if (deleteConfirmText.toLowerCase() !== 'delete') {
@@ -177,32 +199,45 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
       return;
     }
 
-    const res = storageService.deleteUser(currentUser, deletingUser.id);
-    if (!res.success) {
-      onShowToast(res.error || 'Failed to delete user account.', 'warning');
-    } else {
-      onShowToast(`Permanently deleted account for ${deletingUser.name}.`, 'info');
+    try {
+      const canonicalRole = deletingUser.role.toUpperCase() as 'ADMIN' | 'CLINICIAN' | 'CASHIER';
+      await pharmacyService.adminUpdateUser({
+        targetUserId: deletingUser.id,
+        fullName: deletingUser.name,
+        role: canonicalRole,
+        status: 'INACTIVE',
+      });
+      onShowToast(`Deactivated account for ${deletingUser.name}.`, 'info');
       onRefreshUsers();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      onShowToast(msg || 'Failed to deactivate account.', 'warning');
     }
+
     setDeletingUser(null);
     setDeleteConfirmText('');
   };
 
   // Handle Password Reset
-  const handleConfirmResetPassword = (e: React.FormEvent) => {
+  const handleConfirmResetPassword = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!resetPasswordUser || !newPasswordInput) return;
 
-    const res = storageService.resetUserPassword(currentUser, resetPasswordUser.id, newPasswordInput);
-    if (!res.success) {
-      onShowToast(res.error || 'Failed to reset password.', 'warning');
+    if (newPasswordInput.trim().length < 6) {
+      onShowToast('Password must be at least 6 characters long.', 'warning');
       return;
     }
 
-    onShowToast(`Password reset for ${resetPasswordUser.name} successfully updated.`, 'success');
-    setResetPasswordUser(null);
-    setNewPasswordInput('');
-    onRefreshUsers();
+    try {
+      await pharmacyService.adminResetPassword(resetPasswordUser.id, newPasswordInput.trim());
+      onShowToast(`Password reset for ${resetPasswordUser.name} successfully updated.`, 'success');
+      setResetPasswordUser(null);
+      setNewPasswordInput('');
+      onRefreshUsers();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      onShowToast(msg || 'Failed to reset password.', 'warning');
+    }
   };
 
   return (

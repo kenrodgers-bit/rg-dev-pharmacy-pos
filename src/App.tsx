@@ -18,8 +18,9 @@ import { BarcodeScannerModal } from './components/BarcodeScannerModal';
 import { ReceiptModal } from './components/ReceiptModal';
 import { LoginView } from './components/LoginView';
 import { storageService } from './services/storage';
+import { pharmacyService } from './services/pharmacyService';
 import { useOnlineStatus } from './hooks/useOnlineStatus';
-import { useSessionTimeout } from './hooks/useSessionTimeout';
+import { useSessionTimeout, INACTIVITY_TIMEOUT_MS } from './hooks/useSessionTimeout';
 import { useRealtimeSync } from './hooks/useRealtimeSync';
 import { supabaseConfig } from './services/supabase';
 import {
@@ -38,11 +39,6 @@ import {
 import { playScanSuccessBeep } from './utils/audio';
 import { formatKSh } from './utils/currency';
 import { CheckCircle2, Info, Lock, ShieldAlert } from 'lucide-react';
-
-// Session security: auto-logout after this many minutes of inactivity, with
-// a warning toast shown shortly before the session actually ends.
-const SESSION_TIMEOUT_MINUTES = 15;
-const SESSION_WARNING_SECONDS = 60;
 
 // Role-based tab access: admin can access everything. Clinicians handle
 // tests & prescriptions but don't run the till or manage inventory/admin
@@ -236,24 +232,30 @@ export default function App() {
     setCurrentUser(storageService.getActiveUser());
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await pharmacyService.signOut();
+    } catch (e) {
+      // ignore
+    }
     storageService.logoutActiveUser(currentUser);
     setCurrentUser(null);
     showToast('Signed out of session.', 'info');
   };
 
-  // Security: auto-logout after a period of inactivity. Runs only while a
-  // user is signed in, and resets on any mouse/keyboard/touch/scroll activity.
+  // Security: exact 30-minute inactivity auto-logout with cross-tab BroadcastChannel sync.
   useSessionTimeout({
     enabled: !!currentUser,
-    timeoutMs: SESSION_TIMEOUT_MINUTES * 60 * 1000,
-    warningMs: SESSION_WARNING_SECONDS * 1000,
-    onWarning: () => showToast(`Session will expire in ${SESSION_WARNING_SECONDS}s due to inactivity...`, 'warning'),
-    onTimeout: () => {
+    onWarning: (msRemaining) => {
+      const sec = Math.round(msRemaining / 1000);
+      showToast(`Security Warning: Session expiring in ${sec}s due to inactivity...`, 'warning');
+    },
+    onTimeout: (reason) => {
       if (currentUser) {
+        pharmacyService.signOut().catch(() => {});
         storageService.logoutActiveUser(currentUser);
         setCurrentUser(null);
-        showToast('You were signed out automatically after a period of inactivity.', 'info');
+        showToast(reason || 'Session expired after 30 minutes of inactivity. Please sign in again.', 'info');
       }
     },
   });
@@ -328,32 +330,45 @@ export default function App() {
   }, [currentUser?.role, activeTab]);
 
   // Sync Offline Queue when returning online or manually triggered
-  const handleSyncOfflineQueue = () => {
+  const handleSyncOfflineQueue = async () => {
     if (offlineQueue.length === 0) {
       showToast('No offline transactions waiting to sync.', 'info');
       return;
     }
 
-    const count = offlineQueue.length;
-    const syncedTransactions = transactions.map((tx) => {
-      if (tx.isOffline) {
-        return {
-          ...tx,
-          isOffline: false,
-          synced: true,
-          syncTimestamp: new Date().toISOString(),
-        };
+    if (!isOnline) {
+      showToast('Cannot synchronize: No internet connection detected.', 'warning');
+      return;
+    }
+
+    try {
+      const res = await pharmacyService.syncOfflineSales();
+      if (res.failed > 0) {
+        showToast(`Synced ${res.synced} sales with PostgreSQL backend. ${res.failed} sync conflicts occurred.`, 'warning');
+      } else {
+        showToast(`Successfully synced ${res.synced} offline transaction${res.synced > 1 ? 's' : ''} with backend!`, 'success');
       }
-      return tx;
-    });
 
-    setTransactions(syncedTransactions);
-    storageService.saveTransactions(syncedTransactions);
+      // Refresh state from authoritative service
+      const remainingQueue = pharmacyService.getOfflineQueue();
+      setOfflineQueue(remainingQueue);
 
-    setOfflineQueue([]);
-    storageService.clearOfflineQueue();
-
-    showToast(`Successfully synced ${count} offline transaction${count > 1 ? 's' : ''} with server!`, 'success');
+      const [cloudMeds, cloudSales] = await Promise.all([
+        pharmacyService.fetchMedications(),
+        pharmacyService.fetchSales(),
+      ]);
+      if (cloudMeds && cloudMeds.length > 0) {
+        setMedications(cloudMeds);
+        storageService.saveMedications(cloudMeds);
+      }
+      if (cloudSales && cloudSales.length > 0) {
+        setTransactions(cloudSales);
+        storageService.saveTransactions(cloudSales);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      showToast(`Sync encountered an error: ${msg}`, 'error');
+    }
   };
 
   // Automatic sync when connection is restored
@@ -832,11 +847,21 @@ export default function App() {
       showToast(`Sale completed successfully! Receipt ${transaction.receiptNumber}`, 'success');
     }
 
-    // 6. Handle Offline Queueing if offline
-    if (transaction.isOffline) {
-      storageService.addToOfflineQueue(transaction);
-      setOfflineQueue(storageService.getOfflineQueue());
-      showToast(`Sale recorded in offline queue (${transaction.receiptNumber}). It will auto-sync when online.`, 'info');
+    // 6. Handle Offline Queueing or Supabase RPC commit
+    if (transaction.isOffline || !isOnline || !supabaseConfig.isConfigured()) {
+      pharmacyService.enqueueOfflineSale(transaction);
+      setOfflineQueue(pharmacyService.getOfflineQueue());
+      showToast(`Sale recorded in offline queue (${transaction.receiptNumber}). Will auto-sync when online.`, 'info');
+    } else {
+      pharmacyService.completeSale(transaction).then((res) => {
+        if (!res.success) {
+          pharmacyService.enqueueOfflineSale(transaction);
+          setOfflineQueue(pharmacyService.getOfflineQueue());
+        }
+      }).catch(() => {
+        pharmacyService.enqueueOfflineSale(transaction);
+        setOfflineQueue(pharmacyService.getOfflineQueue());
+      });
     }
 
     // 7. Open thermal receipt modal

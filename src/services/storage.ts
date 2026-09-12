@@ -4,10 +4,13 @@ import {
   InventoryFilters,
   MedicalTest,
   Medication,
+  normalizeRole,
+  normalizeStatus,
   POSTab,
   Prescription,
   ReceiptSettings,
   SaleTransaction,
+  toDisplayRole,
   User,
   UserRole,
 } from '../types';
@@ -402,17 +405,21 @@ export const storageService = {
       return { success: false, error: `Username "${userData.username}" is already taken.` };
     }
 
+    const canonicalRole = normalizeRole(userData.role);
+    const canonicalStatus = normalizeStatus((userData as any).status);
+
     const newUser: User = {
       id: 'user-' + Date.now(),
       username: cleanUsername,
       name: userData.name.trim(),
       email: userData.email?.trim() || `${cleanUsername}@afyacare.co.ke`,
       phone: userData.phone?.trim() || '',
-      role: userData.role,
-      status: 'active',
-      password: userData.password || 'pharmacy123',
+      role: toDisplayRole(canonicalRole),
+      canonicalRole,
+      status: canonicalStatus === 'ACTIVE' ? 'active' : 'inactive',
+      canonicalStatus,
       licenseNumber: userData.licenseNumber?.trim() || '',
-      avatarColor: userData.role === 'admin' ? 'bg-teal-700' : userData.role === 'clinician' ? 'bg-blue-600' : 'bg-emerald-600',
+      avatarColor: canonicalRole === 'ADMIN' ? 'bg-teal-700' : canonicalRole === 'CLINICIAN' ? 'bg-blue-600' : 'bg-emerald-600',
       createdAt: new Date().toISOString(),
     };
 
@@ -503,7 +510,6 @@ export const storageService = {
       email: updates.email !== undefined ? updates.email.trim() : target.email,
       phone: updates.phone !== undefined ? updates.phone.trim() : target.phone,
       licenseNumber: updates.licenseNumber !== undefined ? updates.licenseNumber.trim() : target.licenseNumber,
-      password: updates.password !== undefined ? updates.password : target.password,
       // Admin-only fields
       role: actingUser.role === 'admin' && updates.role ? updates.role : target.role,
       status: actingUser.role === 'admin' && updates.status ? updates.status : target.status,

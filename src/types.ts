@@ -1,21 +1,46 @@
 /**
  * RG Pharma-POS Types & Interfaces
+ * Production Canonical Models with Supabase PostgreSQL Integration
  */
 
-export type UserRole = 'admin' | 'clinician' | 'cashier';
+// Phase 3: Exact Three User Roles
+export type CanonicalUserRole = 'ADMIN' | 'CLINICIAN' | 'CASHIER';
+export type UserRole = 'admin' | 'clinician' | 'cashier' | 'ADMIN' | 'CLINICIAN' | 'CASHIER';
 
-export type UserStatus = 'active' | 'inactive';
+export const normalizeRole = (role?: string | null): CanonicalUserRole => {
+  if (!role) return 'CASHIER';
+  const upper = role.toUpperCase();
+  if (upper === 'ADMIN') return 'ADMIN';
+  if (upper === 'CLINICIAN') return 'CLINICIAN';
+  return 'CASHIER';
+};
+
+export const toDisplayRole = (role?: string | null): 'admin' | 'clinician' | 'cashier' => {
+  const norm = normalizeRole(role);
+  if (norm === 'ADMIN') return 'admin';
+  if (norm === 'CLINICIAN') return 'clinician';
+  return 'cashier';
+};
+
+export type CanonicalUserStatus = 'ACTIVE' | 'INACTIVE';
+export type UserStatus = 'active' | 'inactive' | 'ACTIVE' | 'INACTIVE';
+
+export const normalizeStatus = (status?: string | null): CanonicalUserStatus => {
+  if (!status) return 'ACTIVE';
+  return status.toUpperCase() === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE';
+};
 
 export interface User {
   id: string;
   username: string;
-  email?: string;
+  email: string;
   name: string;
-  role: UserRole;
-  status: UserStatus;
+  role: 'admin' | 'clinician' | 'cashier';
+  canonicalRole: CanonicalUserRole;
+  status: 'active' | 'inactive';
+  canonicalStatus: CanonicalUserStatus;
   createdAt: string;
   lastLogin?: string;
-  password?: string;
   phone?: string;
   licenseNumber?: string;
   avatarColor: string;
@@ -35,33 +60,46 @@ export type AppNavTab =
 export interface AuditLog {
   id: string;
   timestamp: string;
-  userId: string;
+  userId?: string;
   userName: string;
   userRole: UserRole;
   action: string;
   details: string;
   category: 'AUTH' | 'USERS' | 'INVENTORY' | 'SALES' | 'SETTINGS' | 'SYSTEM' | 'CLINICAL';
+  metadata?: Record<string, unknown>;
 }
 
-export type MedicationCategory = 
-  | 'Antibiotics'
-  | 'Cardiovascular'
-  | 'Pain & Analgesics'
-  | 'Respiratory'
-  | 'Gastrointestinal'
-  | 'Diabetes'
-  | 'OTC & First Aid'
-  | 'Vitamins & Supplements';
+export interface Category {
+  id: string;
+  name: string;
+  type: string;
+  description?: string;
+  active: boolean;
+}
+
+export type MedicationCategory = string;
+
+export interface InventoryBatch {
+  id: string;
+  medicationId: string;
+  batchNumber: string;
+  expiryDate: string; // YYYY-MM-DD
+  quantityOnHand: number;
+  unitCost: number;
+  receivedAt?: string;
+  active: boolean;
+}
 
 export interface Medication {
   id: string;
   name: string;
   genericName: string;
-  dosage: string; // e.g., "500mg", "10mg/5ml", "20mcg"
-  form: 'Tablet' | 'Capsule' | 'Syrup' | 'Injection' | 'Inhaler' | 'Ointment' | 'Drops';
-  category: MedicationCategory;
-  isPrescriptionRequired: boolean; // Rx required
-  barcode: string; // NDC or EAN
+  dosage: string;
+  form: 'Tablet' | 'Capsule' | 'Syrup' | 'Injection' | 'Inhaler' | 'Ointment' | 'Drops' | string;
+  categoryId?: string;
+  category: string;
+  isPrescriptionRequired: boolean;
+  barcode: string;
   price: number;
   costPrice: number;
   stock: number;
@@ -70,14 +108,64 @@ export interface Medication {
   expiryDate: string; // YYYY-MM-DD
   manufacturer: string;
   requiresRefrigeration?: boolean;
+  active?: boolean;
+  batches?: InventoryBatch[];
 }
 
-export type PrescriptionStatus = 'Active' | 'Dispensed' | 'Partially Dispensed' | 'Expired';
+export interface Patient {
+  id: string;
+  patientNumber: string;
+  fullName: string;
+  dateOfBirth: string;
+  sex?: 'MALE' | 'FEMALE' | 'OTHER';
+  phone?: string;
+  email?: string;
+  address?: string;
+  createdAt?: string;
+}
+
+export interface Visit {
+  id: string;
+  patientId: string;
+  visitNumber: string;
+  visitDate: string;
+  status: 'ACTIVE' | 'COMPLETED' | 'CANCELLED';
+  createdBy?: string;
+}
+
+export interface Consultation {
+  id: string;
+  visitId: string;
+  patientId: string;
+  clinicianId: string;
+  vitals: Record<string, unknown>;
+  observations?: string;
+  clinicalNotes?: string;
+  assessment?: string;
+  diagnosis?: string;
+}
+
+export type PrescriptionStatus = 'Active' | 'Dispensed' | 'Partially Dispensed' | 'Expired' | 'Cancelled';
+
+export interface PrescriptionItem {
+  id: string;
+  prescriptionId: string;
+  medicationId: string;
+  medicationName?: string;
+  dosage: string;
+  frequency: string;
+  duration: string;
+  quantity: number;
+  instructions: string;
+  dispensingStatus: 'PENDING' | 'PARTIALLY_DISPENSED' | 'DISPENSED' | 'CANCELLED';
+  quantityDispensed: number;
+}
 
 export interface Prescription {
   id: string;
-  rxNumber: string; // e.g., "RX-80219"
+  rxNumber: string;
   barcode: string;
+  patientId?: string;
   patientName: string;
   patientDOB: string;
   patientPhone: string;
@@ -86,7 +174,7 @@ export interface Prescription {
   doctorClinic: string;
   medicationId: string;
   medicationName: string;
-  dosageInstructions: string; // e.g. "Take 1 tablet twice daily after meals for 10 days"
+  dosageInstructions: string;
   quantityPrescribed: number;
   quantityDispensedSoFar: number;
   refillsAllowed: number;
@@ -95,40 +183,45 @@ export interface Prescription {
   expiryDate: string;
   status: PrescriptionStatus;
   insuranceProvider?: string;
-  insuranceCoPayRate?: number; // e.g., 0.20 for 80% coverage
+  insuranceCoPayRate?: number;
+  items?: PrescriptionItem[];
 }
 
 export type TestStatus = 'Ordered' | 'In Progress' | 'Completed' | 'Cancelled';
 
 export interface MedicalTest {
   id: string;
-  testNumber: string; // e.g. "TST-40291"
+  testNumber: string;
   patientName: string;
   patientDOB: string;
   patientPhone: string;
-  clinicianName: string; // Ordering clinician
+  clinicianName: string;
   clinicianLicense: string;
-  testType: string; // e.g. "Blood Glucose Panel", "Malaria RDT", "Full Blood Count"
-  notes: string; // Clinical notes / reason for test
+  testType: string;
+  notes: string;
   dateOrdered: string;
   status: TestStatus;
   resultSummary?: string;
   resultDate?: string;
-  linkedPrescriptionId?: string; // Optional follow-on prescription created from results
+  linkedPrescriptionId?: string;
 }
 
 export interface CartItem {
   medication: Medication;
   quantity: number;
-  prescriptionId?: string; // linked Rx if Rx item
+  prescriptionId?: string;
+  prescriptionItemId?: string;
   rxNumber?: string;
   patientName?: string;
   discountPercent?: number;
+  batchId?: string;
+  batchNumber?: string;
+  expiryDate?: string;
 }
 
 export interface POSTab {
   id: string;
-  name: string; // e.g. "Tab 1", "Walk-in #1", "Grace Muthoni"
+  name: string;
   cart: CartItem[];
   patientName?: string;
   isParked?: boolean;
@@ -146,20 +239,24 @@ export type PaymentMethod =
 
 export interface SaleTransaction {
   id: string;
+  clientOperationId?: string; // Idempotency key
   receiptNumber: string;
   timestamp: string;
   cashierName: string;
   cashierRole: UserRole;
   items: {
     medicationId: string;
+    batchId?: string;
     name: string;
     genericName: string;
     dosage: string;
     isPrescription: boolean;
     rxNumber?: string;
+    prescriptionItemId?: string;
     patientName?: string;
     quantity: number;
     unitPrice: number;
+    discountPercent?: number;
     totalPrice: number;
     batchNumber?: string;
     expiryDate?: string;
@@ -176,6 +273,8 @@ export interface SaleTransaction {
   mpesaReference?: string;
   mpesaPhone?: string;
   patientName?: string;
+  patientId?: string;
+  prescriptionId?: string;
   cardAuthCode?: string;
   insuranceProvider?: string;
   insurancePolicyNumber?: string;
@@ -195,9 +294,9 @@ export interface ReceiptSettings {
   addressLine2: string;
   phone: string;
   email: string;
-  licenseNumber: string; // State Pharmacy License or DEA
+  licenseNumber: string;
   taxId: string;
-  taxRate: number; // e.g., 0.05 for 5%
+  taxRate: number;
   paperWidth: '80mm' | '58mm';
   headerMessage: string;
   footerMessage: string;
@@ -234,11 +333,10 @@ export type ExpiryFilterPreset =
 
 export interface InventoryFilters {
   searchTerm: string;
-  category: string; // 'All' or specific category
-  supplier: string; // 'All' or specific manufacturer
+  category: string;
+  supplier: string;
   stockStatus: 'all' | 'low' | 'rx' | 'otc' | 'expiring';
   expiryPreset: ExpiryFilterPreset;
-  expiryStartDate: string; // 'YYYY-MM-DD'
-  expiryEndDate: string; // 'YYYY-MM-DD'
+  expiryStartDate: string;
+  expiryEndDate: string;
 }
-

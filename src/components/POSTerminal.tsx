@@ -532,20 +532,26 @@ export const POSTerminal: React.FC<POSTerminalProps> = ({
     try {
       const receiptNumber = 'REC-' + Math.floor(100000 + Math.random() * 900000);
       const roundedTotal = Math.ceil(total);
+      const clientOperationId = typeof crypto !== 'undefined' && crypto.randomUUID
+        ? crypto.randomUUID()
+        : 'op_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
 
       const transaction: SaleTransaction = {
         id: 'tx-' + Date.now(),
+        clientOperationId,
         receiptNumber,
         timestamp: new Date().toISOString(),
         cashierName: currentUser.name,
         cashierRole: currentUser.role,
         items: cart.map((it) => ({
           medicationId: it.medication.id,
+          batchId: it.batchId || it.medication.batches?.[0]?.id,
           name: it.medication.name,
           genericName: it.medication.genericName,
           dosage: it.medication.dosage,
           isPrescription: it.medication.isPrescriptionRequired,
           rxNumber: it.rxNumber,
+          prescriptionItemId: it.prescriptionItemId,
           patientName: it.patientName || patientNameInput,
           quantity: it.quantity,
           unitPrice: it.medication.price,
@@ -667,20 +673,26 @@ export const POSTerminal: React.FC<POSTerminalProps> = ({
 
     try {
       const receiptNumber = 'REC-' + Math.floor(100000 + Math.random() * 900000);
+      const clientOperationId = typeof crypto !== 'undefined' && crypto.randomUUID
+        ? crypto.randomUUID()
+        : 'op_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
 
       const transaction: SaleTransaction = {
         id: 'tx-' + Date.now(),
+        clientOperationId,
         receiptNumber,
         timestamp: new Date().toISOString(),
         cashierName: currentUser.name,
         cashierRole: currentUser.role,
         items: cart.map((it) => ({
           medicationId: it.medication.id,
+          batchId: it.batchId || it.medication.batches?.[0]?.id,
           name: it.medication.name,
           genericName: it.medication.genericName,
           dosage: it.medication.dosage,
           isPrescription: it.medication.isPrescriptionRequired,
           rxNumber: it.rxNumber,
+          prescriptionItemId: it.prescriptionItemId,
           patientName: it.patientName || patientNameInput,
           quantity: it.quantity,
           unitPrice: it.medication.price,
