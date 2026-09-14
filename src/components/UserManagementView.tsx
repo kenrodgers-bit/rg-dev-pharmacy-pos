@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import { User, UserRole, UserStatus } from '../types';
 import { storageService } from '../services/storage';
-import { pharmacyService } from '../services/pharmacyService';
+import { adminCreateUser, adminDeleteUser, adminResetPassword, updateUserProfileInSupabase, supabaseConfig } from '../services/supabase';
 
 interface UserManagementViewProps {
   currentUser: User;
@@ -74,6 +74,8 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
   // Delete explicit confirmation input
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
 
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
   // Filter users
   const filteredUsers = users.filter((u) => {
     const matchesSearch =
@@ -93,44 +95,55 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
     e.preventDefault();
     setFormError(null);
 
-    if (!newName.trim() || !newUsername.trim() || !newPassword.trim()) {
-      setFormError('Please fill in all required fields: Name, Username, and Initial Password.');
+    if (!newName.trim() || !newEmail.trim() || !newPassword.trim()) {
+      setFormError('Please fill in all required fields: Name, Email, and Initial Password.');
       return;
     }
 
-    if (newPassword.trim().length < 6) {
-      setFormError('Password must be at least 6 characters long for secure authentication.');
+    if (!supabaseConfig.isConfigured()) {
+      setFormError('Cannot create a staff account: no database is configured. Configure Supabase in Settings first.');
       return;
     }
 
-    const emailToUse = newEmail.trim() || `${newUsername.trim().toLowerCase()}@pharmacy.local`;
-    const canonicalRole = newRole.toUpperCase() as 'ADMIN' | 'CLINICIAN' | 'CASHIER';
+    setIsSubmitting(true);
+    const res = await adminCreateUser({
+      name: newName,
+      email: newEmail,
+      password: newPassword,
+      role: newRole,
+      phone: newPhone,
+      license: newLicense,
+    });
+    setIsSubmitting(false);
 
-    try {
-      await pharmacyService.adminCreateUser({
-        email: emailToUse,
-        password: newPassword.trim(),
-        fullName: newName.trim(),
-        role: canonicalRole,
-        phone: newPhone.trim() || undefined,
-        licenseNumber: newLicense.trim() || undefined,
-      });
-
-      onShowToast(`Created staff account for ${newName} successfully.`, 'success');
-      setIsCreateModalOpen(false);
-      // Reset form
-      setNewName('');
-      setNewUsername('');
-      setNewEmail('');
-      setNewPhone('');
-      setNewRole('cashier');
-      setNewPassword('');
-      setNewLicense('');
-      onRefreshUsers();
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setFormError(msg || 'Failed to create user account.');
+    if (!res.ok) {
+      setFormError(
+        res.error ||
+          'Failed to create user account. Make sure the admin-manage-user Edge Function is deployed.'
+      );
+      return;
     }
+
+    storageService.addAuditLog({
+      userId: currentUser.id,
+      userName: currentUser.name,
+      userRole: currentUser.role,
+      action: 'USER_CREATED',
+      details: `Created new ${newRole.toUpperCase()} account for ${newName} (${newEmail})`,
+      category: 'USERS',
+    });
+
+    onShowToast(`Created staff account for ${newName} successfully.`, 'success');
+    setIsCreateModalOpen(false);
+    // Reset form
+    setNewName('');
+    setNewUsername('');
+    setNewEmail('');
+    setNewPhone('');
+    setNewRole('cashier');
+    setNewPassword('');
+    setNewLicense('');
+    onRefreshUsers();
   };
 
   // Handle Edit User
@@ -139,58 +152,75 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
     if (!editingUser) return;
     setFormError(null);
 
-    const canonicalRole = editingUser.role.toUpperCase() as 'ADMIN' | 'CLINICIAN' | 'CASHIER';
-    const canonicalStatus = editingUser.status.toUpperCase() as 'ACTIVE' | 'INACTIVE';
-
-    try {
-      await pharmacyService.adminUpdateUser({
-        targetUserId: editingUser.id,
-        fullName: editingUser.name.trim(),
-        role: canonicalRole,
-        status: canonicalStatus,
-        phone: editingUser.phone?.trim() || undefined,
-        licenseNumber: editingUser.licenseNumber?.trim() || undefined,
-      });
-
-      onShowToast(`Updated account details for ${editingUser.name}.`, 'success');
-      setEditingUser(null);
-      onRefreshUsers();
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setFormError(msg || 'Failed to update user account.');
+    if (!supabaseConfig.isConfigured()) {
+      setFormError('Cannot update this account: no database is configured.');
+      return;
     }
+
+    setIsSubmitting(true);
+    const res = await updateUserProfileInSupabase(editingUser.id, {
+      name: editingUser.name,
+      email: editingUser.email,
+      phone: editingUser.phone,
+      licenseNumber: editingUser.licenseNumber,
+      role: editingUser.role,
+      status: editingUser.status,
+    });
+    setIsSubmitting(false);
+
+    if (!res.ok) {
+      setFormError(res.error || 'Failed to update user account.');
+      return;
+    }
+
+    storageService.addAuditLog({
+      userId: currentUser.id,
+      userName: currentUser.name,
+      userRole: currentUser.role,
+      action: 'USER_UPDATED',
+      details: `Updated account details for ${editingUser.name}`,
+      category: 'USERS',
+    });
+
+    onShowToast(`Updated account details for ${editingUser.name}.`, 'success');
+    setEditingUser(null);
+    onRefreshUsers();
   };
 
   // Handle Deactivate / Activate
   const handleConfirmToggleStatus = async () => {
     if (!deactivatingUser) return;
 
-    const canonicalRole = deactivatingUser.role.toUpperCase() as 'ADMIN' | 'CLINICIAN' | 'CASHIER';
-    const targetStatus = deactivatingUser.status === 'active' ? 'INACTIVE' : 'ACTIVE';
+    if (deactivatingUser.id === currentUser.id) {
+      onShowToast('You cannot deactivate your own account.', 'warning');
+      setDeactivatingUser(null);
+      return;
+    }
 
-    try {
-      await pharmacyService.adminUpdateUser({
-        targetUserId: deactivatingUser.id,
-        fullName: deactivatingUser.name,
-        role: canonicalRole,
-        status: targetStatus,
-        phone: deactivatingUser.phone,
-        licenseNumber: deactivatingUser.licenseNumber,
+    const newStatus: UserStatus = deactivatingUser.status === 'active' ? 'inactive' : 'active';
+    const res = await updateUserProfileInSupabase(deactivatingUser.id, { status: newStatus });
+
+    if (!res.ok) {
+      onShowToast(res.error || 'Failed to update user status.', 'warning');
+    } else {
+      storageService.addAuditLog({
+        userId: currentUser.id,
+        userName: currentUser.name,
+        userRole: currentUser.role,
+        action: newStatus === 'active' ? 'USER_ACTIVATED' : 'USER_DEACTIVATED',
+        details: `Account for ${deactivatingUser.name} was ${newStatus === 'active' ? 'activated' : 'deactivated'}`,
+        category: 'USERS',
       });
-
       onShowToast(
-        `Account for ${deactivatingUser.name} has been ${targetStatus === 'ACTIVE' ? 'activated' : 'deactivated'}.`,
+        `Account for ${deactivatingUser.name} has been ${newStatus === 'active' ? 'activated' : 'deactivated'}.`,
         'info'
       );
       onRefreshUsers();
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      onShowToast(msg || 'Failed to update user status.', 'warning');
     }
     setDeactivatingUser(null);
   };
 
-  // Handle Delete (or permanent deactivation)
+  // Handle Delete
   const handleConfirmDelete = async () => {
     if (!deletingUser) return;
 
@@ -199,21 +229,30 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
       return;
     }
 
-    try {
-      const canonicalRole = deletingUser.role.toUpperCase() as 'ADMIN' | 'CLINICIAN' | 'CASHIER';
-      await pharmacyService.adminUpdateUser({
-        targetUserId: deletingUser.id,
-        fullName: deletingUser.name,
-        role: canonicalRole,
-        status: 'INACTIVE',
-      });
-      onShowToast(`Deactivated account for ${deletingUser.name}.`, 'info');
-      onRefreshUsers();
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      onShowToast(msg || 'Failed to deactivate account.', 'warning');
+    if (deletingUser.id === currentUser.id) {
+      onShowToast('You cannot delete your own account.', 'warning');
+      setDeletingUser(null);
+      return;
     }
 
+    const res = await adminDeleteUser(deletingUser.id);
+    if (!res.ok) {
+      onShowToast(
+        res.error || 'Failed to delete user account. Make sure the admin-manage-user Edge Function is deployed.',
+        'warning'
+      );
+    } else {
+      storageService.addAuditLog({
+        userId: currentUser.id,
+        userName: currentUser.name,
+        userRole: currentUser.role,
+        action: 'USER_DELETED',
+        details: `Permanently deleted account for ${deletingUser.name}`,
+        category: 'USERS',
+      });
+      onShowToast(`Permanently deleted account for ${deletingUser.name}.`, 'info');
+      onRefreshUsers();
+    }
     setDeletingUser(null);
     setDeleteConfirmText('');
   };
@@ -223,21 +262,28 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
     e.preventDefault();
     if (!resetPasswordUser || !newPasswordInput) return;
 
-    if (newPasswordInput.trim().length < 6) {
-      onShowToast('Password must be at least 6 characters long.', 'warning');
+    const res = await adminResetPassword(resetPasswordUser.id, newPasswordInput);
+    if (!res.ok) {
+      onShowToast(
+        res.error || 'Failed to reset password. Make sure the admin-manage-user Edge Function is deployed.',
+        'warning'
+      );
       return;
     }
 
-    try {
-      await pharmacyService.adminResetPassword(resetPasswordUser.id, newPasswordInput.trim());
-      onShowToast(`Password reset for ${resetPasswordUser.name} successfully updated.`, 'success');
-      setResetPasswordUser(null);
-      setNewPasswordInput('');
-      onRefreshUsers();
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      onShowToast(msg || 'Failed to reset password.', 'warning');
-    }
+    storageService.addAuditLog({
+      userId: currentUser.id,
+      userName: currentUser.name,
+      userRole: currentUser.role,
+      action: 'PASSWORD_RESET',
+      details: `Reset password for ${resetPasswordUser.name}`,
+      category: 'USERS',
+    });
+
+    onShowToast(`Password reset for ${resetPasswordUser.name} successfully updated.`, 'success');
+    setResetPasswordUser(null);
+    setNewPasswordInput('');
+    onRefreshUsers();
   };
 
   return (

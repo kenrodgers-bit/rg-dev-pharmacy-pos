@@ -4,13 +4,10 @@ import {
   InventoryFilters,
   MedicalTest,
   Medication,
-  normalizeRole,
-  normalizeStatus,
   POSTab,
   Prescription,
   ReceiptSettings,
   SaleTransaction,
-  toDisplayRole,
   User,
   UserRole,
 } from '../types';
@@ -362,6 +359,12 @@ export const storageService = {
     } catch (e) {
       console.error('Failed to load users from storage', e);
     }
+    // Demo/sample staff accounts are a local-only-mode convenience and must
+    // never appear once this app is talking to a real Supabase project -
+    // the real roster comes from fetchAllUsersFromSupabase() instead.
+    if (getSupabase()) {
+      return [];
+    }
     this.saveUsers(DEMO_USERS);
     return DEMO_USERS;
   },
@@ -378,276 +381,12 @@ export const storageService = {
     return this.getUsers().find((u) => u.id === id);
   },
 
-  createUser(
-    actingUser: User,
-    userData: {
-      name: string;
-      username: string;
-      email?: string;
-      phone?: string;
-      role: UserRole;
-      password?: string;
-      licenseNumber?: string;
-    }
-  ): { success: boolean; user?: User; error?: string } {
-    if (actingUser.role !== 'admin') {
-      return { success: false, error: 'Unauthorized: Only administrators can create new staff accounts.' };
-    }
+  // NOTE: local-only createUser/updateUser/toggleUserStatus/deleteUser/
+  // resetUserPassword were removed - user management is now Supabase-
+  // backed (see services/supabase.ts: adminCreateUser, adminDeleteUser,
+  // adminResetPassword, updateUserProfileInSupabase, changeOwnPassword,
+  // and supabase/functions/admin-manage-user for the privileged parts).
 
-    const currentUsers = this.getUsers();
-    const cleanUsername = userData.username.trim().toLowerCase();
-
-    if (!cleanUsername) {
-      return { success: false, error: 'Username cannot be blank.' };
-    }
-
-    if (currentUsers.some((u) => u.username.toLowerCase() === cleanUsername)) {
-      return { success: false, error: `Username "${userData.username}" is already taken.` };
-    }
-
-    const canonicalRole = normalizeRole(userData.role);
-    const canonicalStatus = normalizeStatus((userData as any).status);
-
-    const newUser: User = {
-      id: 'user-' + Date.now(),
-      username: cleanUsername,
-      name: userData.name.trim(),
-      email: userData.email?.trim() || `${cleanUsername}@afyacare.co.ke`,
-      phone: userData.phone?.trim() || '',
-      role: toDisplayRole(canonicalRole),
-      canonicalRole,
-      status: canonicalStatus === 'ACTIVE' ? 'active' : 'inactive',
-      canonicalStatus,
-      licenseNumber: userData.licenseNumber?.trim() || '',
-      avatarColor: canonicalRole === 'ADMIN' ? 'bg-teal-700' : canonicalRole === 'CLINICIAN' ? 'bg-blue-600' : 'bg-emerald-600',
-      createdAt: new Date().toISOString(),
-    };
-
-    const updated = [newUser, ...currentUsers];
-    this.saveUsers(updated);
-
-    this.addAuditLog({
-      userId: actingUser.id,
-      userName: actingUser.name,
-      userRole: actingUser.role,
-      action: 'USER_CREATED',
-      details: `Created new ${newUser.role.toUpperCase()} account for ${newUser.name} (@${newUser.username})`,
-      category: 'USERS',
-    });
-
-    return { success: true, user: newUser };
-  },
-
-  updateUser(
-    actingUser: User,
-    targetUserId: string,
-    updates: Partial<User>
-  ): { success: boolean; user?: User; error?: string } {
-    const currentUsers = this.getUsers();
-    const target = currentUsers.find((u) => u.id === targetUserId);
-
-    if (!target) {
-      return { success: false, error: 'Target user account not found.' };
-    }
-
-    // Role-based security checks:
-    // 1. If acting user is staff: can only edit own profile, and can NEVER alter role, status, id, or permissions
-    if (actingUser.role !== 'admin') {
-      if (actingUser.id !== targetUserId) {
-        return { success: false, error: 'Unauthorized: Staff members cannot edit other user accounts.' };
-      }
-      // Strip forbidden keys
-      if (updates.role && updates.role !== target.role) {
-        return { success: false, error: 'Unauthorized: Staff members cannot modify account role.' };
-      }
-      if (updates.status && updates.status !== target.status) {
-        return { success: false, error: 'Unauthorized: Staff members cannot modify account status.' };
-      }
-    }
-
-    // 2. If acting user is admin:
-    if (actingUser.role === 'admin') {
-      // Admin cannot change their own role from ADMIN to STAFF
-      if (actingUser.id === targetUserId && updates.role && updates.role !== 'admin') {
-        return { success: false, error: 'Security restriction: Administrators cannot downgrade their own role.' };
-      }
-
-      // Check last remaining admin rule
-      if (
-        (updates.role && updates.role !== 'admin' && target.role === 'admin') ||
-        (updates.status === 'inactive' && target.role === 'admin')
-      ) {
-        const activeAdmins = currentUsers.filter((u) => u.role === 'admin' && u.status === 'active');
-        if (activeAdmins.length <= 1 && activeAdmins.some((u) => u.id === targetUserId)) {
-          return {
-            success: false,
-            error: 'Action prohibited: Cannot downgrade or deactivate the last remaining active Administrator.',
-          };
-        }
-      }
-    }
-
-    // Admin self-downgrade protection
-    if (actingUser.id === targetUserId && updates.role && updates.role !== 'admin' && target.role === 'admin') {
-      return { success: false, error: 'Security restriction: Administrators cannot downgrade their own role.' };
-    }
-
-    // Last admin protection
-    if (target.role === 'admin' && updates.role && updates.role !== 'admin') {
-      const activeAdmins = currentUsers.filter((u) => u.role === 'admin' && u.status === 'active');
-      if (activeAdmins.length <= 1) {
-        return {
-          success: false,
-          error: 'Security restriction: Cannot downgrade the last remaining active Administrator.',
-        };
-      }
-    }
-
-    // Safe updates whitelist
-    const updatedUser: User = {
-      ...target,
-      name: updates.name !== undefined ? updates.name.trim() : target.name,
-      email: updates.email !== undefined ? updates.email.trim() : target.email,
-      phone: updates.phone !== undefined ? updates.phone.trim() : target.phone,
-      licenseNumber: updates.licenseNumber !== undefined ? updates.licenseNumber.trim() : target.licenseNumber,
-      // Admin-only fields
-      role: actingUser.role === 'admin' && updates.role ? updates.role : target.role,
-      status: actingUser.role === 'admin' && updates.status ? updates.status : target.status,
-    };
-
-    const updatedList = currentUsers.map((u) => (u.id === targetUserId ? updatedUser : u));
-    this.saveUsers(updatedList);
-
-    // If updating current active user, sync active user storage as well
-    const active = this.getActiveUser();
-    if (active.id === targetUserId) {
-      this.saveActiveUser(updatedUser);
-    }
-
-    this.addAuditLog({
-      userId: actingUser.id,
-      userName: actingUser.name,
-      userRole: actingUser.role,
-      action: 'USER_UPDATED',
-      details: `Updated account details for ${updatedUser.name} (@${updatedUser.username})`,
-      category: actingUser.id === targetUserId ? 'AUTH' : 'USERS',
-    });
-
-    return { success: true, user: updatedUser };
-  },
-
-  toggleUserStatus(actingUser: User, targetUserId: string): { success: boolean; user?: User; error?: string } {
-    if (actingUser.role !== 'admin') {
-      return { success: false, error: 'Unauthorized: Only administrators can modify account statuses.' };
-    }
-
-    if (actingUser.id === targetUserId) {
-      return { success: false, error: 'Security restriction: You cannot deactivate your own currently active account.' };
-    }
-
-    const currentUsers = this.getUsers();
-    const target = currentUsers.find((u) => u.id === targetUserId);
-    if (!target) return { success: false, error: 'User not found.' };
-
-    const newStatus = target.status === 'active' ? 'inactive' : 'active';
-
-    // Last admin check
-    if (newStatus === 'inactive' && target.role === 'admin') {
-      const activeAdmins = currentUsers.filter((u) => u.role === 'admin' && u.status === 'active');
-      if (activeAdmins.length <= 1) {
-        return {
-          success: false,
-          error: 'Security restriction: Cannot deactivate the last remaining active Administrator.',
-        };
-      }
-    }
-
-    const updatedUser: User = { ...target, status: newStatus };
-    const updatedList = currentUsers.map((u) => (u.id === targetUserId ? updatedUser : u));
-    this.saveUsers(updatedList);
-
-    this.addAuditLog({
-      userId: actingUser.id,
-      userName: actingUser.name,
-      userRole: actingUser.role,
-      action: newStatus === 'active' ? 'USER_ACTIVATED' : 'USER_DEACTIVATED',
-      details: `${newStatus === 'active' ? 'Activated' : 'Deactivated'} account of ${target.name} (@${target.username})`,
-      category: 'USERS',
-    });
-
-    return { success: true, user: updatedUser };
-  },
-
-  deleteUser(actingUser: User, targetUserId: string): { success: boolean; error?: string } {
-    if (actingUser.role !== 'admin') {
-      return { success: false, error: 'Unauthorized: Only administrators can delete staff accounts.' };
-    }
-
-    if (actingUser.id === targetUserId) {
-      return { success: false, error: 'Security restriction: Administrators cannot delete their own account.' };
-    }
-
-    const currentUsers = this.getUsers();
-    const target = currentUsers.find((u) => u.id === targetUserId);
-    if (!target) return { success: false, error: 'User not found.' };
-
-    if (target.role === 'admin') {
-      const adminCount = currentUsers.filter((u) => u.role === 'admin').length;
-      if (adminCount <= 1) {
-        return {
-          success: false,
-          error: 'Security restriction: Cannot delete the last remaining Administrator.',
-        };
-      }
-    }
-
-    const updatedList = currentUsers.filter((u) => u.id !== targetUserId);
-    this.saveUsers(updatedList);
-
-    this.addAuditLog({
-      userId: actingUser.id,
-      userName: actingUser.name,
-      userRole: actingUser.role,
-      action: 'USER_DELETED',
-      details: `Permanently removed ${target.role.toUpperCase()} account for ${target.name} (@${target.username})`,
-      category: 'USERS',
-    });
-
-    return { success: true };
-  },
-
-  resetUserPassword(actingUser: User, targetUserId: string, newPassword: string): { success: boolean; error?: string } {
-    if (actingUser.role !== 'admin' && actingUser.id !== targetUserId) {
-      return { success: false, error: 'Unauthorized: You can only change your own password.' };
-    }
-
-    if (!newPassword || newPassword.length < 4) {
-      return { success: false, error: 'Password must be at least 4 characters.' };
-    }
-
-    const currentUsers = this.getUsers();
-    const target = currentUsers.find((u) => u.id === targetUserId);
-    if (!target) return { success: false, error: 'User not found.' };
-
-    const updatedUser = { ...target, password: newPassword };
-    const updatedList = currentUsers.map((u) => (u.id === targetUserId ? updatedUser : u));
-    this.saveUsers(updatedList);
-
-    if (this.getActiveUser().id === targetUserId) {
-      this.saveActiveUser(updatedUser);
-    }
-
-    this.addAuditLog({
-      userId: actingUser.id,
-      userName: actingUser.name,
-      userRole: actingUser.role,
-      action: 'PASSWORD_RESET',
-      details: `Password reset performed for ${target.name} (@${target.username})`,
-      category: 'AUTH',
-    });
-
-    return { success: true };
-  },
 
   // Audit Logs
   getAuditLogs(): AuditLog[] {
@@ -683,11 +422,14 @@ export const storageService = {
   },
 
   // Active User / Auth
+  //
+  // SECURITY: This must NEVER fall back to "the first known user" or a
+  // demo account. It only returns a user that was explicitly placed here
+  // by a successful `saveActiveUser()` call after real authentication
+  // (see `signInWithSupabase` / `signUpInitialAdmin` in services/supabase.ts).
+  // Absence of a session here means "signed out" - full stop.
   getActiveUser(): User | null {
     try {
-      if (localStorage.getItem(STORAGE_KEYS.LOGGED_OUT) === 'true') {
-        return null;
-      }
       const data = localStorage.getItem(STORAGE_KEYS.ACTIVE_USER);
       if (data) {
         const parsed = JSON.parse(data);
@@ -696,8 +438,7 @@ export const storageService = {
     } catch (e) {
       console.error('Failed to load active user', e);
     }
-    const all = this.getUsers();
-    return all[0] || DEMO_USERS[0];
+    return null;
   },
 
   saveActiveUser(user: User): void {
@@ -728,54 +469,12 @@ export const storageService = {
     }
   },
 
-  authenticateUser(username: string, passwordInput: string): { success: boolean; user?: User; error?: string } {
-    const cleanUsername = username.trim().toLowerCase();
-    const cleanPassword = passwordInput.trim();
-
-    if (!cleanUsername) {
-      return { success: false, error: 'Please enter your username.' };
-    }
-    if (!cleanPassword) {
-      return { success: false, error: 'Please enter your password.' };
-    }
-
-    const allUsers = this.getUsers();
-    const matched = allUsers.find((u) => u.username.toLowerCase() === cleanUsername);
-
-    if (!matched) {
-      return { success: false, error: 'Invalid username or credentials.' };
-    }
-
-    if (matched.status === 'inactive') {
-      return { success: false, error: 'This account has been deactivated. Please contact an Administrator.' };
-    }
-
-    const expectedPassword = matched.password || matched.username;
-    if (cleanPassword !== expectedPassword) {
-      return { success: false, error: 'Incorrect password for this account.' };
-    }
-
-    // Update lastLogin
-    const updatedUser: User = {
-      ...matched,
-      lastLogin: new Date().toISOString(),
-    };
-
-    const updatedList = allUsers.map((u) => (u.id === matched.id ? updatedUser : u));
-    this.saveUsers(updatedList);
-    this.saveActiveUser(updatedUser);
-
-    this.addAuditLog({
-      userId: updatedUser.id,
-      userName: updatedUser.name,
-      userRole: updatedUser.role,
-      action: 'USER_LOGIN',
-      details: `User authenticated and signed into account (@${updatedUser.username})`,
-      category: 'AUTH',
-    });
-
-    return { success: true, user: updatedUser };
-  },
+  // NOTE: The previous local, plaintext-password `authenticateUser()` method
+  // has been removed. It is not called anywhere in the app (LoginView calls
+  // `signInWithSupabase()` in services/supabase.ts) and comparing passwords
+  // against a value stored in a client-readable table is exactly the "fake
+  // authentication" / "local database authority" pattern real auth must not
+  // use. Real credential checking now happens server-side via Supabase Auth.
 
   // Reset business data: deletes all stock, sales, prescriptions, and app activity logs while strictly preserving shop details (name, address, tax PIN, logo, receipt config) and user accounts
   resetBusinessData(adminUser?: { id: string; name: string; role: string }): void {
@@ -935,6 +634,22 @@ export const storageService = {
       return null;
     }
   },
+
+  async pushTransactionToCloud(t: SaleTransaction): Promise<boolean> {
+    const client = getSupabase();
+    if (!client) return false;
+    try {
+      const { error } = await client.from('sale_transactions').upsert(transactionToRow(t));
+      if (error) {
+        console.error('Cloud sync failed (transaction upsert)', error);
+        return false;
+      }
+      return true;
+    } catch (e) {
+      console.error('Cloud sync failed (transaction upsert)', e);
+      return false;
+    }
+  },
 };
 
 // ------------------------------------------------------------------
@@ -1070,5 +785,35 @@ function rowToTest(r: any): MedicalTest {
     resultSummary: r.result_summary || undefined,
     resultDate: r.result_date || undefined,
     linkedPrescriptionId: r.linked_prescription_id || undefined,
+  };
+}
+
+function transactionToRow(t: SaleTransaction) {
+  return {
+    id: t.id,
+    receipt_number: t.receiptNumber,
+    timestamp: t.timestamp,
+    cashier_name: t.cashierName,
+    cashier_role: t.cashierRole,
+    items: t.items,
+    subtotal: t.subtotal,
+    tax: t.tax,
+    discount: t.discount,
+    total: t.total,
+    payment_method: t.paymentMethod,
+    amount_tendered: t.amountTendered ?? null,
+    change_due: t.changeDue ?? null,
+    cash_amount: t.cashAmount ?? null,
+    mpesa_amount: t.mpesaAmount ?? null,
+    mpesa_reference: t.mpesaReference ?? null,
+    mpesa_phone: t.mpesaPhone ?? null,
+    patient_name: t.patientName ?? null,
+    card_auth_code: t.cardAuthCode ?? null,
+    insurance_provider: t.insuranceProvider ?? null,
+    insurance_policy_number: t.insurancePolicyNumber ?? null,
+    insurance_auth_code: t.insuranceAuthCode ?? null,
+    is_offline: t.isOffline,
+    synced: true,
+    sync_timestamp: new Date().toISOString(),
   };
 }

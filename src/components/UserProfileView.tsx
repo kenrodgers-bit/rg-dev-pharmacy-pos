@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { User } from '../types';
 import { storageService } from '../services/storage';
+import { updateUserProfileInSupabase, changeOwnPassword, supabaseConfig } from '../services/supabase';
 
 interface UserProfileViewProps {
   currentUser: User;
@@ -48,44 +49,59 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
   const normalizedRole = currentUser?.role || 'cashier';
 
   // Handle Save Personal Info
-  const handleSaveProfile = (e: React.FormEvent) => {
+  const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
     setProfileMessage(null);
 
-    // Call storageService.updateUser which explicitly enforces role & permission integrity!
-    const res = storageService.updateUser(currentUser, currentUser.id, {
+    if (!supabaseConfig.isConfigured()) {
+      onShowToast('Cannot save: no database is configured.', 'warning');
+      return;
+    }
+
+    const res = await updateUserProfileInSupabase(currentUser.id, {
       name,
       email,
       phone,
       licenseNumber,
-      // Strictly pass no role or status modifications from here
+      // Strictly no role or status modifications from this self-service screen.
     });
 
-    if (!res.success || !res.user) {
+    if (!res.ok) {
       onShowToast(res.error || 'Failed to save profile changes.', 'warning');
       return;
     }
 
-    onUpdateCurrentUser(res.user);
+    const updatedUser: User = { ...currentUser, name, email, phone, licenseNumber };
+    onUpdateCurrentUser(updatedUser);
+    storageService.saveActiveUser(updatedUser);
     onShowToast('Profile information updated successfully.', 'success');
     setProfileMessage('Changes saved.');
     setTimeout(() => setProfileMessage(null), 3000);
   };
 
   // Handle Password Change
-  const handleChangePassword = (e: React.FormEvent) => {
+  const handleChangePassword = async (e: React.FormEvent) => {
     e.preventDefault();
     setPasswordError(null);
     setPasswordSuccess(null);
 
-    // Verify current password if user has one
-    if (currentUser.password && currentPassword !== currentUser.password) {
-      setPasswordError('Current password entered is incorrect.');
+    if (!supabaseConfig.isConfigured()) {
+      setPasswordError('Cannot change password: no database is configured.');
       return;
     }
 
-    if (newPassword.length < 4) {
-      setPasswordError('New password must be at least 4 characters long.');
+    if (!currentUser.email) {
+      setPasswordError('Your account has no email on file - contact an administrator.');
+      return;
+    }
+
+    if (!currentPassword) {
+      setPasswordError('Please enter your current password.');
+      return;
+    }
+
+    if (newPassword.length < 8) {
+      setPasswordError('New password must be at least 8 characters long.');
       return;
     }
 
@@ -94,8 +110,8 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
       return;
     }
 
-    const res = storageService.resetUserPassword(currentUser, currentUser.id, newPassword);
-    if (!res.success) {
+    const res = await changeOwnPassword(currentUser.email, currentPassword, newPassword);
+    if (!res.ok) {
       setPasswordError(res.error || 'Failed to update password.');
       return;
     }

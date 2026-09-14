@@ -30,11 +30,11 @@ export function useRealtimeSync({
   useEffect(() => {
     if (!enabled || !supabaseConfig.isConfigured()) return;
 
-    const tables: RealtimeTable[] = ['medications', 'prescriptions', 'test_orders'];
+    const tables: RealtimeTable[] = ['medications', 'prescriptions', 'tests'];
     const unsubscribe = subscribeToRealtimeChanges(tables, (table) => {
       if (table === 'medications') callbacksRef.current.onMedicationsChanged();
       if (table === 'prescriptions') callbacksRef.current.onPrescriptionsChanged();
-      if (table === 'test_orders') callbacksRef.current.onTestsChanged();
+      if (table === 'tests') callbacksRef.current.onTestsChanged();
     });
 
     return () => unsubscribe();

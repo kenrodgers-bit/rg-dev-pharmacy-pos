@@ -18,11 +18,17 @@ import { BarcodeScannerModal } from './components/BarcodeScannerModal';
 import { ReceiptModal } from './components/ReceiptModal';
 import { LoginView } from './components/LoginView';
 import { storageService } from './services/storage';
-import { pharmacyService } from './services/pharmacyService';
 import { useOnlineStatus } from './hooks/useOnlineStatus';
-import { useSessionTimeout, INACTIVITY_TIMEOUT_MS } from './hooks/useSessionTimeout';
+import { useSessionTimeout } from './hooks/useSessionTimeout';
 import { useRealtimeSync } from './hooks/useRealtimeSync';
-import { supabaseConfig } from './services/supabase';
+import {
+  supabaseConfig,
+  checkBootstrapAvailable,
+  signOutSupabase,
+  getUserProfile,
+  onAuthStateChange,
+  fetchAllUsersFromSupabase,
+} from './services/supabase';
 import {
   AppNavTab,
   AuditLog,
@@ -40,6 +46,11 @@ import { playScanSuccessBeep } from './utils/audio';
 import { formatKSh } from './utils/currency';
 import { CheckCircle2, Info, Lock, ShieldAlert } from 'lucide-react';
 
+// Session security: auto-logout after this many minutes of inactivity, with
+// a warning toast shown shortly before the session actually ends.
+const SESSION_TIMEOUT_MINUTES = 30;
+const SESSION_WARNING_SECONDS = 60;
+
 // Role-based tab access: admin can access everything. Clinicians handle
 // tests & prescriptions but don't run the till or manage inventory/admin
 // modules. Cashiers run the till & dispense but don't order clinical tests.
@@ -55,7 +66,16 @@ function isTabAllowedForRole(tab: AppNavTab, role: UserRole): boolean {
 export default function App() {
   // Navigation & Role State
   const [activeTab, setActiveTab] = useState<AppNavTab>('pos');
-  const [currentUser, setCurrentUser] = useState<User | null>(() => storageService.getActiveUser());
+  // Auth state is authoritative from Supabase Auth (see the session-restore
+  // effect below), not localStorage. The lazy initializer here is only a
+  // same-tab fallback for when Supabase isn't configured at all (local/dev
+  // mode); it is immediately overridden once the real session check runs.
+  const [currentUser, setCurrentUser] = useState<User | null>(() =>
+    supabaseConfig.isConfigured() ? null : storageService.getActiveUser()
+  );
+  const [sessionLoading, setSessionLoading] = useState(() => supabaseConfig.isConfigured());
+  const [inactivityMessage, setInactivityMessage] = useState<string | null>(null);
+  const [isBootstrapAvailable, setIsBootstrapAvailable] = useState(false);
   const [users, setUsers] = useState<User[]>(() => storageService.getUsers());
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>(() => storageService.getAuditLogs());
 
@@ -227,35 +247,111 @@ export default function App() {
   };
 
   const refreshUsersAndLogs = () => {
-    setUsers(storageService.getUsers());
+    if (supabaseConfig.isConfigured()) {
+      fetchAllUsersFromSupabase().then((cloudUsers) => {
+        if (cloudUsers) {
+          setUsers(cloudUsers);
+          storageService.saveUsers(cloudUsers);
+        }
+      });
+    } else {
+      setUsers(storageService.getUsers());
+    }
     setAuditLogs(storageService.getAuditLogs());
-    setCurrentUser(storageService.getActiveUser());
+    // NOTE: currentUser is no longer re-derived from local storage here -
+    // it's authoritative from the Supabase session effect above. Reading
+    // storageService.getActiveUser() here would incorrectly log the admin
+    // out, since nothing caches an active session locally anymore.
   };
 
-  const handleLogout = async () => {
-    try {
-      await pharmacyService.signOut();
-    } catch (e) {
-      // ignore
-    }
+  const handleLogout = () => {
     storageService.logoutActiveUser(currentUser);
     setCurrentUser(null);
+    void signOutSupabase();
     showToast('Signed out of session.', 'info');
   };
 
-  // Security: exact 30-minute inactivity auto-logout with cross-tab BroadcastChannel sync.
+  // Session restore: authentication is authoritative from Supabase Auth,
+  // not from anything cached locally. Subscribes once on mount; the first
+  // callback (Supabase's INITIAL_SESSION event) resolves whatever session
+  // already exists (refresh, reopened browser), and later callbacks handle
+  // sign-in/sign-out/token-refresh - including from other tabs.
+  useEffect(() => {
+    if (!supabaseConfig.isConfigured()) {
+      setSessionLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    const unsubscribe = onAuthStateChange((authUserId) => {
+      (async () => {
+        if (!authUserId) {
+          if (cancelled) return;
+          storageService.logoutActiveUser(null);
+          setCurrentUser(null);
+          setSessionLoading(false);
+          return;
+        }
+
+        const profile = await getUserProfile(authUserId);
+        if (cancelled) return;
+
+        if (!profile) {
+          // Session exists in Supabase Auth but there's no matching
+          // active pharmacy_users profile (deactivated, or auth account
+          // without a completed profile) - treat as signed out.
+          await signOutSupabase();
+          setCurrentUser(null);
+          setSessionLoading(false);
+          return;
+        }
+
+        setCurrentUser((prev) => (prev?.id === profile.id ? prev : profile));
+        storageService.saveActiveUser(profile);
+        setSessionLoading(false);
+      })();
+    });
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // First-run setup: while logged out, check whether any administrator
+  // account exists yet so LoginView can offer the bootstrap "create
+  // administrator" form instead of a sign-in form nobody could pass.
+  useEffect(() => {
+    if (currentUser || !supabaseConfig.isConfigured()) {
+      setIsBootstrapAvailable(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const available = await checkBootstrapAvailable();
+      if (!cancelled) setIsBootstrapAvailable(available);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser]);
+
+  // Security: auto-logout after a period of inactivity. Runs only while a
+  // user is signed in, and resets on any mouse/keyboard/touch/scroll activity.
   useSessionTimeout({
     enabled: !!currentUser,
-    onWarning: (msRemaining) => {
-      const sec = Math.round(msRemaining / 1000);
-      showToast(`Security Warning: Session expiring in ${sec}s due to inactivity...`, 'warning');
-    },
-    onTimeout: (reason) => {
+    timeoutMs: SESSION_TIMEOUT_MINUTES * 60 * 1000,
+    warningMs: SESSION_WARNING_SECONDS * 1000,
+    onWarning: () => showToast(`Session will expire in ${SESSION_WARNING_SECONDS}s due to inactivity...`, 'warning'),
+    onTimeout: () => {
       if (currentUser) {
-        pharmacyService.signOut().catch(() => {});
         storageService.logoutActiveUser(currentUser);
         setCurrentUser(null);
-        showToast(reason || 'Session expired after 30 minutes of inactivity. Please sign in again.', 'info');
+        void signOutSupabase();
+        setInactivityMessage('You were logged out due to inactivity.');
+        showToast('You were logged out due to inactivity.', 'info');
       }
     },
   });
@@ -266,10 +362,11 @@ export default function App() {
   useEffect(() => {
     if (!currentUser || !supabaseConfig.isConfigured()) return;
     (async () => {
-      const [cloudMeds, cloudRx, cloudTests] = await Promise.all([
+      const [cloudMeds, cloudRx, cloudTests, cloudUsers] = await Promise.all([
         storageService.pullMedicationsFromCloud(),
         storageService.pullPrescriptionsFromCloud(),
         storageService.pullTestsFromCloud(),
+        fetchAllUsersFromSupabase(),
       ]);
       if (cloudMeds && cloudMeds.length > 0) {
         setMedications(cloudMeds);
@@ -282,6 +379,10 @@ export default function App() {
       if (cloudTests) {
         setTests(cloudTests);
         storageService.saveTests(cloudTests);
+      }
+      if (cloudUsers) {
+        setUsers(cloudUsers);
+        storageService.saveUsers(cloudUsers);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -330,45 +431,68 @@ export default function App() {
   }, [currentUser?.role, activeTab]);
 
   // Sync Offline Queue when returning online or manually triggered
-  const handleSyncOfflineQueue = async () => {
+  const handleSyncOfflineQueue = () => {
     if (offlineQueue.length === 0) {
       showToast('No offline transactions waiting to sync.', 'info');
       return;
     }
 
-    if (!isOnline) {
-      showToast('Cannot synchronize: No internet connection detected.', 'warning');
+    // Without a configured Supabase project there is no server to sync to;
+    // fall back to just clearing local "offline" flags so the UI queue
+    // doesn't grow unbounded while running in local-only/demo mode.
+    if (!supabaseConfig.isConfigured()) {
+      const count = offlineQueue.length;
+      const localOnlySynced = transactions.map((tx) =>
+        tx.isOffline ? { ...tx, isOffline: false, synced: false } : tx
+      );
+      setTransactions(localOnlySynced);
+      storageService.saveTransactions(localOnlySynced);
+      setOfflineQueue([]);
+      storageService.clearOfflineQueue();
+      showToast(
+        `Cleared ${count} offline transaction${count > 1 ? 's' : ''} (no database configured, saved locally only).`,
+        'info'
+      );
       return;
     }
 
-    try {
-      const res = await pharmacyService.syncOfflineSales();
-      if (res.failed > 0) {
-        showToast(`Synced ${res.synced} sales with PostgreSQL backend. ${res.failed} sync conflicts occurred.`, 'warning');
-      } else {
-        showToast(`Successfully synced ${res.synced} offline transaction${res.synced > 1 ? 's' : ''} with backend!`, 'success');
-      }
+    const count = offlineQueue.length;
 
-      // Refresh state from authoritative service
-      const remainingQueue = pharmacyService.getOfflineQueue();
+    (async () => {
+      const results = await Promise.all(offlineQueue.map((tx) => storageService.pushTransactionToCloud(tx)));
+      const succeededIds = new Set(offlineQueue.filter((_, i) => results[i]).map((tx) => tx.id));
+      const failedCount = count - succeededIds.size;
+
+      const syncedTransactions = transactions.map((tx) => {
+        if (tx.isOffline && succeededIds.has(tx.id)) {
+          return {
+            ...tx,
+            isOffline: false,
+            synced: true,
+            syncTimestamp: new Date().toISOString(),
+          };
+        }
+        return tx;
+      });
+
+      setTransactions(syncedTransactions);
+      storageService.saveTransactions(syncedTransactions);
+
+      const remainingQueue = offlineQueue.filter((tx) => !succeededIds.has(tx.id));
       setOfflineQueue(remainingQueue);
+      storageService.saveOfflineQueue(remainingQueue);
 
-      const [cloudMeds, cloudSales] = await Promise.all([
-        pharmacyService.fetchMedications(),
-        pharmacyService.fetchSales(),
-      ]);
-      if (cloudMeds && cloudMeds.length > 0) {
-        setMedications(cloudMeds);
-        storageService.saveMedications(cloudMeds);
+      if (succeededIds.size > 0) {
+        showToast(
+          `Synced ${succeededIds.size} offline transaction${succeededIds.size > 1 ? 's' : ''} to the server${
+            failedCount > 0 ? `, ${failedCount} still pending` : ''
+          }.`,
+          failedCount > 0 ? 'warning' : 'success'
+        );
+      } else {
+        showToast('Unable to synchronize changes. Will retry when connectivity is restored.', 'warning');
       }
-      if (cloudSales && cloudSales.length > 0) {
-        setTransactions(cloudSales);
-        storageService.saveTransactions(cloudSales);
-      }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      showToast(`Sync encountered an error: ${msg}`, 'error');
-    }
+    })();
   };
 
   // Automatic sync when connection is restored
@@ -807,6 +931,9 @@ export default function App() {
     const newTxList = [transaction, ...transactions];
     setTransactions(newTxList);
     storageService.saveTransactions(newTxList);
+    if (!transaction.isOffline) {
+      storageService.pushTransactionToCloud(transaction);
+    }
 
     // 4. Log Audit Trail with strict Batch association
     if (currentUser) {
@@ -847,21 +974,11 @@ export default function App() {
       showToast(`Sale completed successfully! Receipt ${transaction.receiptNumber}`, 'success');
     }
 
-    // 6. Handle Offline Queueing or Supabase RPC commit
-    if (transaction.isOffline || !isOnline || !supabaseConfig.isConfigured()) {
-      pharmacyService.enqueueOfflineSale(transaction);
-      setOfflineQueue(pharmacyService.getOfflineQueue());
-      showToast(`Sale recorded in offline queue (${transaction.receiptNumber}). Will auto-sync when online.`, 'info');
-    } else {
-      pharmacyService.completeSale(transaction).then((res) => {
-        if (!res.success) {
-          pharmacyService.enqueueOfflineSale(transaction);
-          setOfflineQueue(pharmacyService.getOfflineQueue());
-        }
-      }).catch(() => {
-        pharmacyService.enqueueOfflineSale(transaction);
-        setOfflineQueue(pharmacyService.getOfflineQueue());
-      });
+    // 6. Handle Offline Queueing if offline
+    if (transaction.isOffline) {
+      storageService.addToOfflineQueue(transaction);
+      setOfflineQueue(storageService.getOfflineQueue());
+      showToast(`Sale recorded in offline queue (${transaction.receiptNumber}). It will auto-sync when online.`, 'info');
     }
 
     // 7. Open thermal receipt modal
@@ -915,6 +1032,12 @@ export default function App() {
   // Authentication & Session
   const handleLogin = (user: User) => {
     setCurrentUser(user);
+    // Cached locally so helper functions in storage.ts that ask "who is
+    // currently signed in" (self-deactivation guard, audit-log actor,
+    // etc.) still work; the actual sign-in gate above is Supabase's
+    // session state, not this cache.
+    storageService.saveActiveUser(user);
+    setInactivityMessage(null);
     if (!isTabAllowedForRole(activeTab, user.role)) {
       setActiveTab(defaultTabForRole(user.role));
     }
@@ -929,6 +1052,19 @@ export default function App() {
   const todayTransactions = transactions.filter((t) => new Date(t.timestamp).toDateString() === today);
   const todayRevenue = todayTransactions.reduce((sum, t) => sum + t.total, 0);
   const todayRevenueFormatted = formatKSh(todayRevenue);
+
+  // While the initial Supabase session check is in flight, avoid flashing
+  // either a stale dashboard or the login form.
+  if (sessionLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-8 h-8 border-3 border-teal-700 border-t-transparent rounded-full animate-spin" />
+          <span className="text-xs font-semibold text-slate-500">Checking session…</span>
+        </div>
+      </div>
+    );
+  }
 
   // If user is logged out, render standalone login authentication screen
   if (!currentUser) {
@@ -961,6 +1097,8 @@ export default function App() {
         <LoginView
           onLogin={handleLogin}
           pharmacyName={receiptSettings.pharmacyName}
+          isBootstrapAvailable={isBootstrapAvailable}
+          inactivityMessage={inactivityMessage}
         />
       </>
     );

@@ -1062,6 +1062,75 @@ export const ReceiptSettingsView: React.FC<ReceiptSettingsViewProps> = ({
               </div>
             </div>
 
+            {/* Section 5: Thermal Printing Automation & Dialogue Behavior */}
+            <div className="rounded-2xl border border-teal-200 bg-teal-50/40 p-5 space-y-4">
+              <div className="flex items-center gap-2 pb-2 border-b border-teal-200/80">
+                <Printer className="w-5 h-5 text-teal-700" />
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">Thermal Printing & Checkout Behavior</h3>
+                  <p className="text-xs text-slate-500">
+                    Control automated hardware printing and dialogue popups after sales
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-3 text-xs">
+                {/* Master Toggle: Enable Receipt Printing */}
+                <label className="flex items-start gap-3 p-3.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 cursor-pointer shadow-2xs">
+                  <input
+                    type="checkbox"
+                    id="enable-receipt-printing-toggle"
+                    disabled={!isAdmin}
+                    checked={formData.enableReceiptPrinting ?? true}
+                    onChange={(e) => handleChange('enableReceiptPrinting', e.target.checked)}
+                    className="w-4 h-4 mt-0.5 rounded text-teal-600 focus:ring-teal-500"
+                  />
+                  <div>
+                    <span className="font-bold text-slate-900 block text-xs">Enable Receipt Printing</span>
+                    <span className="text-[11px] text-slate-600 leading-normal block mt-0.5">
+                      Turn receipt printing on or off. When disabled, checkout completes silently without sending print jobs.
+                    </span>
+                  </div>
+                </label>
+
+                {/* Auto Print Receipt Immediately */}
+                <label className="flex items-start gap-3 p-3.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 cursor-pointer shadow-2xs">
+                  <input
+                    type="checkbox"
+                    id="auto-print-receipt-toggle"
+                    disabled={!isAdmin || formData.enableReceiptPrinting === false}
+                    checked={(formData.enableReceiptPrinting ?? true) && (formData.autoPrintReceipt ?? true)}
+                    onChange={(e) => handleChange('autoPrintReceipt', e.target.checked)}
+                    className="w-4 h-4 mt-0.5 rounded text-teal-600 focus:ring-teal-500"
+                  />
+                  <div>
+                    <span className="font-bold text-slate-900 block text-xs">Auto-Print Receipt Upon Checkout</span>
+                    <span className="text-[11px] text-slate-600 leading-normal block mt-0.5">
+                      Automatically fires the thermal print job immediately when a sale is finalized.
+                    </span>
+                  </div>
+                </label>
+
+                {/* Show in-app dialogue */}
+                <label className="flex items-start gap-3 p-3.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 cursor-pointer shadow-2xs">
+                  <input
+                    type="checkbox"
+                    id="show-receipt-dialog-toggle"
+                    disabled={!isAdmin}
+                    checked={formData.showReceiptDialog ?? false}
+                    onChange={(e) => handleChange('showReceiptDialog', e.target.checked)}
+                    className="w-4 h-4 mt-0.5 rounded text-teal-600 focus:ring-teal-500"
+                  />
+                  <div>
+                    <span className="font-bold text-slate-900 block text-xs">Show In-App Receipt Modal Dialogue</span>
+                    <span className="text-[11px] text-slate-600 leading-normal block mt-0.5">
+                      When unchecked (recommended for speed), no popup modal appears after checkout. The cashier stays directly on the terminal for the next customer.
+                    </span>
+                  </div>
+                </label>
+              </div>
+            </div>
+
             {/* Danger Zone: System Data Reset */}
             <div className="rounded-2xl border border-rose-200 bg-rose-50/50 p-4 sm:p-5 space-y-3">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">

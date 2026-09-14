@@ -217,7 +217,7 @@ export const PrescriptionsManager: React.FC<PrescriptionsManagerProps> = ({
         </div>
 
         <div className="flex items-center gap-1.5 self-start md:self-auto overflow-x-auto w-full md:w-auto">
-          {['All', 'Active', 'Dispensed', 'Expired'].map((st) => (
+          {['All', 'Issued', 'Partially Dispensed', 'Dispensed', 'Expired', 'Cancelled'].map((st) => (
             <button
               key={st}
               onClick={() => setStatusFilter(st)}
@@ -227,7 +227,7 @@ export const PrescriptionsManager: React.FC<PrescriptionsManagerProps> = ({
                   : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
               }`}
             >
-              {st} ({st === 'All' ? prescriptions.length : prescriptions.filter((r) => r.status === st).length})
+              {st} ({st === 'All' ? prescriptions.length : prescriptions.filter((r) => r.status === st || (st === 'Issued' && r.status === 'Active')).length})
             </button>
           ))}
         </div>
@@ -238,13 +238,25 @@ export const PrescriptionsManager: React.FC<PrescriptionsManagerProps> = ({
         {filteredPrescriptions.map((rx) => {
           const med = medications.find((m) => m.id === rx.medicationId);
           const hasStock = med ? med.stock >= rx.quantityPrescribed : false;
-          const isActive = rx.status === 'Active';
+          const isDispensable =
+            (rx.status === 'Active' || rx.status === 'Issued' || rx.status === 'Partially Dispensed') &&
+            rx.status !== 'Dispensed' &&
+            rx.status !== 'Cancelled' &&
+            rx.status !== 'Expired';
+
+          const getStatusBadge = () => {
+            if (rx.status === 'Dispensed') return 'bg-blue-100 text-blue-800';
+            if (rx.status === 'Partially Dispensed') return 'bg-amber-100 text-amber-800';
+            if (rx.status === 'Expired') return 'bg-rose-100 text-rose-800';
+            if (rx.status === 'Cancelled') return 'bg-slate-200 text-slate-700';
+            return 'bg-emerald-100 text-emerald-800';
+          };
 
           return (
             <div
               key={rx.id}
               className={`bg-white rounded-2xl border-2 transition-all p-5 shadow-xs flex flex-col justify-between ${
-                isActive ? 'border-slate-200 hover:border-teal-400' : 'border-slate-200 bg-slate-50/50'
+                isDispensable ? 'border-slate-200 hover:border-teal-400' : 'border-slate-200 bg-slate-50/50'
               }`}
             >
               <div>
@@ -256,13 +268,7 @@ export const PrescriptionsManager: React.FC<PrescriptionsManagerProps> = ({
                         {rx.rxNumber}
                       </span>
                       <span
-                        className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                          rx.status === 'Active'
-                            ? 'bg-emerald-100 text-emerald-800'
-                            : rx.status === 'Dispensed'
-                            ? 'bg-blue-100 text-blue-800'
-                            : 'bg-slate-200 text-slate-700'
-                        }`}
+                        className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${getStatusBadge()}`}
                       >
                         {rx.status}
                       </span>
@@ -368,15 +374,21 @@ export const PrescriptionsManager: React.FC<PrescriptionsManagerProps> = ({
 
               {/* Action */}
               <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-2">
-                <span className="text-[11px] text-slate-400">
-                  {rx.status === 'Dispensed' ? 'Already fulfilled' : 'Ready for dispensing'}
+                <span className="text-[11px] font-medium text-slate-500">
+                  {rx.status === 'Dispensed'
+                    ? '✓ Already fulfilled'
+                    : rx.status === 'Cancelled'
+                    ? '✕ Prescription cancelled'
+                    : rx.status === 'Expired'
+                    ? '✕ Prescription expired'
+                    : 'Ready for dispensing'}
                 </span>
 
                 <button
                   id={`dispense-rx-btn-${rx.rxNumber}`}
                   onClick={() => onDispensePrescription(rx)}
-                  disabled={!isActive || (med && med.stock <= 0)}
-                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-semibold disabled:opacity-40 disabled:cursor-not-allowed shadow-xs transition active:scale-95"
+                  disabled={!isDispensable || (med && med.stock <= 0)}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-semibold disabled:opacity-40 disabled:cursor-not-allowed shadow-xs transition active:scale-95 cursor-pointer"
                 >
                   <ShoppingCart className="w-3.5 h-3.5" />
                   <span>Dispense & Ring Up</span>
